@@ -238,18 +238,29 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Benchmarks")
-    benchmarks_input = st.text_input(
-        "Benchmarks (separados por coma)",
-        value="^GSPC",
-        help="Ej: ^GSPC, SPY, QQQ, EEM. Se descargan al pulsar 'Descargar datos'.",
-        key="bk_input",
-    )
-    # Parsear benchmarks del input
-    benchmarks_list = [b.strip().upper() for b in benchmarks_input.split(",") if b.strip()]
-    if benchmarks_list:
-        st.caption(f"Benchmarks activos: **{', '.join(benchmarks_list)}**")
+
+    # Form garantiza que el text_input se lee al pulsar Añadir
+    with st.form("add_bk_form", clear_on_submit=True):
+        bk_new = st.text_input("Ticker", placeholder="Ej: SPY, QQQ, EEM…")
+        bk_submit = st.form_submit_button("Añadir benchmark", use_container_width=True)
+        if bk_submit and bk_new.strip():
+            bk = bk_new.strip().upper()
+            if bk not in st.session_state.benchmarks:
+                st.session_state.benchmarks.append(bk)
+
+    # Lista actual con botón de quitar
+    if st.session_state.benchmarks:
+        for i, bk in enumerate(st.session_state.benchmarks):
+            bc1, bc2 = st.columns([5, 1])
+            bc1.caption(f"**{bk}**")
+            if bc2.button("✕", key=f"rmbk_{i}"):
+                st.session_state.benchmarks.pop(i)
+                st.rerun()
     else:
-        st.caption("Escribe al menos un benchmark.")
+        st.caption("Añade al menos un benchmark.")
+
+    # Variable auxiliar para usar en el resto de la app
+    benchmarks_list = list(st.session_state.benchmarks)
 
 # =============================================================================
 # CUERPO
@@ -283,6 +294,14 @@ with tab1:
         st.info("Añade al menos un ticker de renta variable.")
 
     st.divider()
+    st.caption(f"**Descargará:** {len(st.session_state.tickers)} activos · "
+               f"{len(benchmarks_list)} benchmark(s): {', '.join(benchmarks_list) if benchmarks_list else '—'}")
+
+    # Detectar si benchmarks cambiaron desde última descarga
+    if (isinstance(st.session_state.bench_rets, dict)
+            and set(st.session_state.bench_rets.keys()) != set(benchmarks_list)):
+        st.warning("Los benchmarks cambiaron. Pulsa Descargar datos para actualizar.")
+
     if st.button("Descargar datos",
                  disabled=(not st.session_state.tickers or not benchmarks_list),
                  type="primary"):
