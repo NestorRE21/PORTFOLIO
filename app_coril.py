@@ -238,20 +238,18 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Benchmarks")
-    st.caption("Añade uno o más benchmarks para comparar.")
-    bk_input = st.text_input("Ticker benchmark", placeholder="^GSPC, SPY, QQQ…",
-                              key="bk_input")
-    if st.button("Añadir benchmark"):
-        bk = bk_input.strip().upper()
-        if bk and bk not in st.session_state.benchmarks:
-            st.session_state.benchmarks.append(bk)
-            st.rerun()
-    for i, bk in enumerate(st.session_state.benchmarks):
-        bc1, bc2 = st.columns([5, 1])
-        bc1.write(f"• {bk}")
-        if bc2.button("✕", key=f"rmbk{i}"):
-            st.session_state.benchmarks.pop(i)
-            st.rerun()
+    benchmarks_input = st.text_input(
+        "Benchmarks (separados por coma)",
+        value="^GSPC",
+        help="Ej: ^GSPC, SPY, QQQ, EEM. Se descargan al pulsar 'Descargar datos'.",
+        key="bk_input",
+    )
+    # Parsear benchmarks del input
+    benchmarks_list = [b.strip().upper() for b in benchmarks_input.split(",") if b.strip()]
+    if benchmarks_list:
+        st.caption(f"Benchmarks activos: **{', '.join(benchmarks_list)}**")
+    else:
+        st.caption("Escribe al menos un benchmark.")
 
 # =============================================================================
 # CUERPO
@@ -285,7 +283,8 @@ with tab1:
         st.info("Añade al menos un ticker de renta variable.")
 
     st.divider()
-    if st.button("Descargar datos", disabled=not st.session_state.tickers,
+    if st.button("Descargar datos",
+                 disabled=(not st.session_state.tickers or not benchmarks_list),
                  type="primary"):
         with st.spinner("Descargando precios…"):
             log_ret = download_equity(tuple(st.session_state.tickers))
@@ -293,7 +292,7 @@ with tab1:
             st.error("No se pudieron descargar precios. Verifica los tickers.")
         else:
             with st.spinner("Descargando benchmarks…"):
-                bench_dict = download_benchmarks(tuple(st.session_state.benchmarks))
+                bench_dict = download_benchmarks(tuple(benchmarks_list))
 
             if not bench_dict:
                 st.error("No se pudieron descargar los benchmarks.")
