@@ -152,6 +152,9 @@ def optimize(tickers, views_cfg, equity_target, fico_target, primary_bench):
 
 def wealth_and_dd(weights, returns, bench_dict, capital):
     """Retornos portafolio + wealth index para portafolio y todos los benchmarks."""
+    if not bench_dict or not isinstance(bench_dict, dict):
+        bench_dict = {}
+
     eq_cols = [a for a in weights.index if a in returns.columns and a != FICO_TICKER]
     w_eq = weights.reindex(eq_cols).fillna(0.0)
 
@@ -375,7 +378,8 @@ with tab2:
 with tab3:
     st.subheader("Optimización")
     ready = (st.session_state.returns is not None
-             and st.session_state.bench_rets is not None)
+             and isinstance(st.session_state.bench_rets, dict)
+             and len(st.session_state.bench_rets) > 0)
     if not ready:
         st.info("Descarga los datos en la pestaña 1 antes de optimizar.")
 
@@ -393,7 +397,8 @@ with tab3:
         else:
             st.warning(f"Solución con advertencias: {res.feasibility_report}")
 
-    if st.session_state.optimized and st.session_state.result is not None:
+    if (st.session_state.optimized and st.session_state.result is not None
+            and isinstance(st.session_state.bench_rets, dict)):
         res = st.session_state.result
 
         m1, m2, m3, m4 = st.columns(4)
