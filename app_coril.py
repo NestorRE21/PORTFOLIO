@@ -51,7 +51,7 @@ BMK_COLORS = ["#888888", "#E377C2", "#FF7F0E", "#9467BD", "#17BECF"]
 # =============================================================================
 def init_state():
     defaults = {
-        "tickers": [], "benchmarks": ["^GSPC"], "views": [],
+        "tickers": [], "views": [],
         "optimized": False, "result": None, "manual_weights": None,
         "returns": None, "bench_rets": None, "betas": None, "sectors": None,
     }
@@ -246,6 +246,14 @@ with st.sidebar:
     st.caption(f"Retorno {FICO.ret_annual:.2%} · Vol {FICO.vol_annual:.2%}")
 
     st.divider()
+    data_period = st.selectbox(
+        "Años de historia",
+        options=["1y", "2y", "3y", "5y", "10y", "max"],
+        index=3,
+        help="Período de datos de Yahoo Finance. Afecta a la optimización, "
+             "backtesting y stress testing.",
+    )
+
     capital_inicial = st.slider(
         "Monto de inversión (USD)", min_value=1_000, max_value=1_000_000,
         value=100_000, step=1_000, format="$%d",
@@ -253,29 +261,18 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Benchmarks")
-
-    # Form garantiza que el text_input se lee al pulsar Añadir
-    with st.form("add_bk_form", clear_on_submit=True):
-        bk_new = st.text_input("Ticker", placeholder="Ej: SPY, QQQ, EEM…")
-        bk_submit = st.form_submit_button("Añadir benchmark", use_container_width=True)
-        if bk_submit and bk_new.strip():
-            bk = bk_new.strip().upper()
-            if bk not in st.session_state.benchmarks:
-                st.session_state.benchmarks.append(bk)
-
-    # Lista actual con botón de quitar
-    if st.session_state.benchmarks:
-        for i, bk in enumerate(st.session_state.benchmarks):
-            bc1, bc2 = st.columns([5, 1])
-            bc1.caption(f"**{bk}**")
-            if bc2.button("✕", key=f"rmbk_{i}"):
-                st.session_state.benchmarks.pop(i)
-                st.rerun()
+    benchmarks_raw = st.text_input(
+        "Tickers separados por coma",
+        value="^GSPC",
+        help="Escribe los benchmarks separados por coma. "
+             "Ej: ^GSPC, SPY, QQQ. Pulsa Enter para confirmar.",
+    )
+    benchmarks_list = [b.strip().upper() for b in benchmarks_raw.split(",")
+                       if b.strip()]
+    if benchmarks_list:
+        st.caption(f"Activos: **{', '.join(benchmarks_list)}**")
     else:
-        st.caption("Añade al menos un benchmark.")
-
-    # Variable auxiliar para usar en el resto de la app
-    benchmarks_list = list(st.session_state.benchmarks)
+        st.warning("Escribe al menos un benchmark.")
 
 # =============================================================================
 # CUERPO
@@ -311,7 +308,7 @@ with tab1:
 
     st.divider()
     st.caption(f"**Descargará:** {len(st.session_state.tickers)} activos · "
-               f"{len(benchmarks_list)} benchmark(s): {', '.join(benchmarks_list) if benchmarks_list else '—'}")
+               f"{len(benchmarks_list)} benchmark(s) · período: {data_period}")
 
     # Detectar si benchmarks cambiaron desde última descarga
     if (isinstance(st.session_state.bench_rets, dict)
@@ -322,12 +319,14 @@ with tab1:
                  disabled=(not st.session_state.tickers or not benchmarks_list),
                  type="primary"):
         with st.spinner("Descargando precios…"):
-            log_ret = download_equity(tuple(st.session_state.tickers))
+            log_ret = download_equity(tuple(st.session_state.tickers),
+                                      period=data_period)
         if log_ret is None or log_ret.empty:
             st.error("No se pudieron descargar precios. Verifica los tickers.")
         else:
             with st.spinner("Descargando benchmarks…"):
-                bench_dict = download_benchmarks(tuple(benchmarks_list))
+                bench_dict = download_benchmarks(tuple(benchmarks_list),
+                                                 period=data_period)
 
             if not bench_dict:
                 st.error("No se pudieron descargar los benchmarks.")
@@ -631,6 +630,12 @@ with tab4:
             m4.metric("VaR 95%", f"${mc.var_terminal:,.0f}")
             m5.metric("CVaR 95%", f"${mc.cvar_terminal:,.0f}")
 
+            st.caption(
+                f"💡 Con ${mc.capital:,.0f} invertidos a {mc.horizon_years:.0f} año(s), "
+                f"el escenario central proyecta un capital de ${mc.median_path[-1]:,.0f}. "
+                f"En el peor 5% de escenarios, la pérdida máxima sería de ${mc.var_terminal:,.0f} (VaR)."
+            )
+
             # ── Gráfico de abanico ───────────────────────────────────────────
             fig = go.Figure()
             x = mc.dates
@@ -690,7 +695,19 @@ with tab4:
                 })
                 st.dataframe(pct_df, use_container_width=True, hide_index=True)
 
-        # ── STRESS TESTING ───────────────────────────────────────────────────
+                # Interpretación dinámica
+                p5_ret = mc.percentiles[5][-1] / mc.capital - 1
+                p50_ret = mc.percentiles[50][-1] / mc.capital - 1
+                p95_ret = mc.percentiles[95][-1] / mc.capital - 1
+                st.info(
+                    f"📊 **Interpretación:** En el 90% de los escenarios simulados, "
+                    f"el capital final se ubica entre "
+                    f"${mc.percentiles[5][-1]:,.0f} ({p5_ret:+.1%}) y "
+                    f"${mc.percentiles[95][-1]:,.0f} ({p95_ret:+.1%}). "
+                    f"El escenario central (mediana) proyecta un retorno de "
+                    f"{p50_ret:+.1%} en {mc.horizon_years:.0f} año(s). "
+                    f"La probabilidad de terminar en pérdida es de {mc.prob_loss:.1%}."
+                )
         st.divider()
         st.markdown("### Stress Testing histórico")
         st.caption("Impacto de crisis históricas en el portafolio actual.")
@@ -739,7 +756,18 @@ with tab4:
                     use_container_width=True, hide_index=True,
                 )
 
-                # Gráfico de barras comparativo
+                # Interpretación dinámica
+                worst = min(available, key=lambda s: s.port_return)
+                best  = max(available, key=lambda s: s.port_return)
+                beats = sum(1 for s in available if s.port_return > s.benchmark_return)
+                st.info(
+                    f"📊 **Interpretación:** El peor escenario histórico para este "
+                    f"portafolio es **{worst.name}** ({worst.port_return:+.2%}, "
+                    f"pérdida de ${abs(worst.port_loss):,.0f}). "
+                    f"El mejor es **{best.name}** ({best.port_return:+.2%}). "
+                    f"El portafolio supera al benchmark en "
+                    f"{beats} de {len(available)} escenarios."
+                )
                 fig3 = go.Figure()
                 names = [s.name for s in available]
                 fig3.add_trace(go.Bar(
