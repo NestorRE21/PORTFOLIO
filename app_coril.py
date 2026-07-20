@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Coril SAB — Optimizador de Portafolios Black-Litterman
-Interfaz comercial (Streamlit) — MOTOR INTEGRADO v2
+Interfaz comercial (Streamlit) — MOTOR INTEGRADO v3
 
-Requiere: optimizer.py en la misma carpeta.
+Cambios v3:
+  - Múltiples benchmarks (dinámicos, se actualizan al redescargar)
+  - Monto de inversión inicial configurable (slider sidebar, hasta 1M)
+  - VaR / CVaR paramétrico e histórico
+  - Betas por regresión OLS
 """
 
 import numpy as np
@@ -17,7 +21,7 @@ from optimizer import (
 )
 
 # =============================================================================
-# CONFIGURACIÓN GLOBAL
+# CONFIGURACIÓN
 # =============================================================================
 st.set_page_config(page_title="Coril · Optimizador BL", page_icon="📈",
                    layout="wide", initial_sidebar_state="expanded")
@@ -39,15 +43,16 @@ PERFILES = {
 }
 
 COL_RV, COL_RF, COL_BMK, COL_OPT = "#2E5E8C", "#2CA02C", "#888888", "#D6604D"
+BMK_COLORS = ["#888888", "#E377C2", "#FF7F0E", "#9467BD", "#17BECF"]
 
 # =============================================================================
-# ESTADO DE SESIÓN
+# ESTADO
 # =============================================================================
 def init_state():
     defaults = {
-        "tickers": [], "views": [], "optimized": False,
-        "result": None, "manual_weights": None,
-        "returns": None, "benchmark": None, "betas": None,
+        "tickers": [], "benchmarks": ["^GSPC"], "views": [],
+        "optimized": False, "result": None, "manual_weights": None,
+        "returns": None, "bench_rets": None, "betas": None,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -55,84 +60,72 @@ def init_state():
 init_state()
 
 # =============================================================================
-# DATOS (yfinance)
+# DATOS
 # =============================================================================
 @st.cache_data(show_spinner=False)
-def load_data(tickers, benchmark, period="5y", interval="1wk"):
-    """Descarga precios, calcula log-returns, betas por regresión y Yahoo."""
+def download_equity(tickers, period="5y", interval="1wk"):
+    """Descarga precios equity y retorna log-returns."""
     import yfinance as yf
-
-    def _prices(raw, tk_list):
-        if isinstance(raw.columns, pd.MultiIndex):
-            px = raw["Close"].copy()
-        else:
-            px = raw[["Close"]].copy()
-            px.columns = tk_list[:1]
-        px = px.dropna(how="all").ffill()
-        px.index = pd.to_datetime(px.index).tz_localize(None)
-        return px
-
-    # --- Precios equity ---
     raw = yf.download(tickers, period=period, interval=interval,
                       auto_adjust=True, progress=False)
     if raw is None or raw.empty:
-        return None, None, None
-    px = _prices(raw, tickers)
-    log_ret = np.log(px / px.shift(1)).replace([np.inf, -np.inf], np.nan).dropna(how="all")
+        return None
+    if isinstance(raw.columns, pd.MultiIndex):
+        px = raw["Close"].copy()
+    else:
+        px = raw[["Close"]].copy()
+        px.columns = list(tickers)[:1]
+    px = px.dropna(how="all").ffill()
+    px.index = pd.to_datetime(px.index).tz_localize(None)
+    return np.log(px / px.shift(1)).replace([np.inf, -np.inf], np.nan).dropna(how="all")
 
-    # --- Benchmark ---
-    rawb = yf.download(benchmark, period=period, interval=interval,
-                       auto_adjust=True, progress=False)
-    if isinstance(rawb.columns, pd.MultiIndex):
-        rawb.columns = rawb.columns.get_level_values(0)
-    pb = rawb["Close"]
-    if isinstance(pb, pd.DataFrame):
-        pb = pb.iloc[:, 0]
-    pb.index = pd.to_datetime(pb.index).tz_localize(None)
-    bench_ret = np.log(pb / pb.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
-    bench_ret.name = benchmark
 
-    # --- Betas: regresión OLS contra benchmark (más fiable que Yahoo .info) ---
-    common = log_ret.index.intersection(bench_ret.index)
-    betas = {}
-    bmk_vals = bench_ret.loc[common].values
-    bmk_var = np.var(bmk_vals, ddof=1)
-    for tk in tickers:
-        if tk not in log_ret.columns:
-            betas[tk] = 1.0
+@st.cache_data(show_spinner=False)
+def download_benchmarks(bench_tickers, period="5y", interval="1wk"):
+    """Descarga uno o más benchmarks, retorna dict de {ticker: Series}."""
+    import yfinance as yf
+    result = {}
+    for bk in bench_tickers:
+        bk = bk.strip().upper()
+        if not bk:
             continue
-        tk_vals = log_ret.loc[common, tk].values
-        mask = np.isfinite(tk_vals) & np.isfinite(bmk_vals)
+        try:
+            raw = yf.download(bk, period=period, interval=interval,
+                              auto_adjust=True, progress=False)
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            pb = raw["Close"]
+            if isinstance(pb, pd.DataFrame):
+                pb = pb.iloc[:, 0]
+            pb.index = pd.to_datetime(pb.index).tz_localize(None)
+            lr = np.log(pb / pb.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+            lr.name = bk
+            result[bk] = lr
+        except Exception:
+            pass
+    return result
+
+
+def calc_betas(returns, bench_ret):
+    """Betas por regresión OLS contra el primer benchmark."""
+    common = returns.index.intersection(bench_ret.index)
+    bmk = bench_ret.loc[common].values
+    bmk_var = np.var(bmk, ddof=1)
+    betas = {}
+    for tk in returns.columns:
+        tk_vals = returns.loc[common, tk].values
+        mask = np.isfinite(tk_vals) & np.isfinite(bmk)
         if mask.sum() > 10 and bmk_var > 1e-12:
-            cov = np.cov(tk_vals[mask], bmk_vals[mask], ddof=1)[0, 1]
+            cov = np.cov(tk_vals[mask], bmk[mask], ddof=1)[0, 1]
             b = cov / bmk_var
             betas[tk] = round(float(b), 3) if np.isfinite(b) and b > 0 else 1.0
         else:
             betas[tk] = 1.0
-
-    # --- Intento secundario: Yahoo .info como referencia (no bloqueante) ---
-    yahoo_betas = {}
-    for tk in tickers:
-        try:
-            info = yf.Ticker(tk).info
-            yb = info.get("beta", None)
-            if yb and np.isfinite(yb) and yb > 0:
-                yahoo_betas[tk] = round(float(yb), 3)
-        except Exception:
-            pass
-
-    beta_df = pd.DataFrame({
-        "Regresión": pd.Series(betas),
-        "Yahoo": pd.Series(yahoo_betas),
-    })
-    # Usar regresión como principal (más consistente con nuestros datos semanales)
-    return log_ret, bench_ret, pd.Series(betas), beta_df
+    return pd.Series(betas)
 
 
-def optimize(tickers, views_cfg, equity_target, fico_target):
-    """Corre el motor y devuelve un ProfileResult."""
+def optimize(tickers, views_cfg, equity_target, fico_target, primary_bench):
     returns   = st.session_state.returns
-    benchmark = st.session_state.benchmark
     betas     = st.session_state.betas.copy()
     betas[FICO_TICKER] = FICO.beta
 
@@ -153,44 +146,43 @@ def optimize(tickers, views_cfg, equity_target, fico_target):
     return run_profile(
         returns=returns, equity_assets=ok_tickers, forced_assets={FICO_TICKER: FICO},
         profile=profile, views=views, config=config,
-        benchmark_returns=benchmark, betas=betas,
+        benchmark_returns=primary_bench, betas=betas,
     )
 
 
-def wealth_and_dd(weights, returns, benchmark):
-    """Calcula wealth index, drawdown y retornos del portafolio, alineados."""
-    # Solo columnas que existen en returns
+def wealth_and_dd(weights, returns, bench_dict, capital):
+    """Retornos portafolio + wealth index para portafolio y todos los benchmarks."""
     eq_cols = [a for a in weights.index if a in returns.columns and a != FICO_TICKER]
     w_eq = weights.reindex(eq_cols).fillna(0.0)
 
-    # Retorno del portafolio = suma de (peso × retorno) de cada activo
     port_ret = pd.Series(0.0, index=returns.index)
     for col in eq_cols:
         port_ret = port_ret + w_eq[col] * returns[col].fillna(0.0)
-
-    # Añadir contribución constante del FICO
     if FICO_TICKER in weights.index and weights[FICO_TICKER] > 1e-8:
-        fico_per = np.log(1 + FICO.ret_annual) / PPY
-        port_ret = port_ret + weights[FICO_TICKER] * fico_per
-
-    # Limpiar NaN residuales
+        port_ret = port_ret + weights[FICO_TICKER] * (np.log(1 + FICO.ret_annual) / PPY)
     port_ret = port_ret.fillna(0.0)
 
-    # Alinear benchmark
-    common = port_ret.index.intersection(benchmark.index)
+    # Alinear con TODOS los benchmarks
+    common = port_ret.index
+    for bk_ret in bench_dict.values():
+        common = common.intersection(bk_ret.index)
     port_ret = port_ret.loc[common]
-    bench_aligned = benchmark.loc[common].fillna(0.0)
 
-    wealth = np.exp(port_ret.cumsum()) * 100
-    wb     = np.exp(bench_aligned.cumsum()) * 100
+    wealth = np.exp(port_ret.cumsum()) * capital
     dd     = wealth / wealth.cummax() - 1.0
-    dd_b   = wb / wb.cummax() - 1.0
 
-    return port_ret, wealth, dd, bench_aligned, wb, dd_b
+    bench_wealths = {}
+    bench_dds     = {}
+    for name, bk_ret in bench_dict.items():
+        br = bk_ret.loc[common].fillna(0.0)
+        bw = np.exp(br.cumsum()) * capital
+        bench_wealths[name] = bw
+        bench_dds[name]     = bw / bw.cummax() - 1.0
+
+    return port_ret, wealth, dd, bench_wealths, bench_dds
 
 
 def calc_var_cvar(returns_series, confidence=0.95):
-    """VaR y CVaR paramétrico y histórico (anualizado, semanal→anual)."""
     clean = returns_series.dropna()
     if len(clean) < 10:
         return {"VaR_hist": np.nan, "CVaR_hist": np.nan,
@@ -199,12 +191,10 @@ def calc_var_cvar(returns_series, confidence=0.95):
     mu  = clean.mean() * PPY
     sig = clean.std(ddof=1) * np.sqrt(PPY)
     alpha = 1 - confidence
-    # Paramétrico (normal)
     z = norm.ppf(alpha)
     var_param  = -(mu + z * sig)
     cvar_param = -(mu - sig * norm.pdf(z) / alpha)
-    # Histórico
-    ann_rets = clean * PPY  # escala semanal a anual (aproximación lineal)
+    ann_rets = clean * PPY
     var_hist  = -float(np.percentile(ann_rets, alpha * 100))
     cvar_hist = -float(ann_rets[ann_rets <= -var_hist].mean()) if (ann_rets <= -var_hist).any() else var_hist
     return {"VaR_hist": var_hist, "CVaR_hist": cvar_hist,
@@ -237,17 +227,39 @@ with st.sidebar:
     st.caption(f"**Renta fija forzada:** {FICO_TICKER}")
     st.caption(f"Retorno {FICO.ret_annual:.2%} · Vol {FICO.vol_annual:.2%}")
 
-    benchmark_ticker = st.text_input("Benchmark", value="^GSPC")
+    st.divider()
+    capital_inicial = st.slider(
+        "Monto de inversión (USD)", min_value=1_000, max_value=1_000_000,
+        value=100_000, step=1_000, format="$%d",
+    )
+
+    st.divider()
+    st.subheader("Benchmarks")
+    st.caption("Añade uno o más benchmarks para comparar.")
+    bk_input = st.text_input("Ticker benchmark", placeholder="^GSPC, SPY, QQQ…",
+                              key="bk_input")
+    if st.button("Añadir benchmark"):
+        bk = bk_input.strip().upper()
+        if bk and bk not in st.session_state.benchmarks:
+            st.session_state.benchmarks.append(bk)
+            st.rerun()
+    for i, bk in enumerate(st.session_state.benchmarks):
+        bc1, bc2 = st.columns([5, 1])
+        bc1.write(f"• {bk}")
+        if bc2.button("✕", key=f"rmbk{i}"):
+            st.session_state.benchmarks.pop(i)
+            st.rerun()
 
 # =============================================================================
 # CUERPO
 # =============================================================================
 st.title("Optimizador Black-Litterman")
-st.caption(f"Mandato: **{perfil_sel}** · {eq_t:.0%} RV / {fi_t:.0%} RF")
+st.caption(f"Mandato: **{perfil_sel}** · {eq_t:.0%} RV / {fi_t:.0%} RF "
+           f" · Inversión: ${capital_inicial:,.0f}")
 
 tab1, tab2, tab3 = st.tabs(["1 · Activos", "2 · Views", "3 · Optimización"])
 
-# ── TAB 1: ACTIVOS ───────────────────────────────────────────────────────────
+# ── TAB 1 ────────────────────────────────────────────────────────────────────
 with tab1:
     st.subheader("Universo de renta variable")
     c_in, c_add = st.columns([4, 1])
@@ -272,25 +284,46 @@ with tab1:
     st.divider()
     if st.button("Descargar datos", disabled=not st.session_state.tickers,
                  type="primary"):
-        with st.spinner("Descargando de Yahoo Finance…"):
-            result = load_data(tuple(st.session_state.tickers), benchmark_ticker)
-        if result[0] is None:
-            st.error("No se pudieron descargar datos. Verifica los tickers.")
+        with st.spinner("Descargando precios…"):
+            log_ret = download_equity(tuple(st.session_state.tickers))
+        if log_ret is None or log_ret.empty:
+            st.error("No se pudieron descargar precios. Verifica los tickers.")
         else:
-            r, b, be, beta_df = result
-            common = r.index.intersection(b.index)
-            st.session_state.returns   = r.loc[common]
-            st.session_state.benchmark = b.loc[common]
-            st.session_state.betas     = be
-            ok = [t for t in st.session_state.tickers if t in r.columns]
-            st.success(f"{len(common)} semanas × {len(ok)} activos.")
-            falt = set(st.session_state.tickers) - set(ok)
-            if falt:
-                st.warning(f"Sin datos (ignorados): {falt}")
-            st.write("**Betas calculados:**")
-            st.dataframe(beta_df.style.format("{:.3f}"), use_container_width=True)
+            with st.spinner("Descargando benchmarks…"):
+                bench_dict = download_benchmarks(tuple(st.session_state.benchmarks))
 
-# ── TAB 2: VIEWS ───────────────────────────────────────────────────────────────
+            if not bench_dict:
+                st.error("No se pudieron descargar los benchmarks.")
+            else:
+                # Alinear todo a fechas comunes
+                common = log_ret.index
+                for bret in bench_dict.values():
+                    common = common.intersection(bret.index)
+                st.session_state.returns   = log_ret.loc[common]
+                st.session_state.bench_rets = {k: v.loc[common] for k, v in bench_dict.items()}
+
+                # Betas contra el primer benchmark
+                primary = list(bench_dict.values())[0]
+                betas = calc_betas(log_ret.loc[common], primary.loc[common])
+                st.session_state.betas = betas
+
+                ok = [t for t in st.session_state.tickers if t in log_ret.columns]
+                st.success(f"{len(common)} semanas × {len(ok)} activos · "
+                           f"{len(bench_dict)} benchmark(s).")
+                falt = set(st.session_state.tickers) - set(ok)
+                if falt:
+                    st.warning(f"Sin datos (ignorados): {falt}")
+
+                st.write("**Betas (regresión OLS vs "
+                         f"{list(bench_dict.keys())[0]}):**")
+                st.dataframe(betas.rename("Beta").to_frame().T.style.format("{:.3f}"),
+                             use_container_width=True)
+
+                # Resetear optimización al redescargar
+                st.session_state.optimized = False
+                st.session_state.result = None
+
+# ── TAB 2 ────────────────────────────────────────────────────────────────────
 with tab2:
     st.subheader("Views del analista")
     if not st.session_state.tickers:
@@ -338,17 +371,20 @@ with tab2:
         else:
             st.info("Sin views: se usa solo el equilibrio de mercado.")
 
-# ── TAB 3: OPTIMIZACIÓN ────────────────────────────────────────────────────────
+# ── TAB 3 ────────────────────────────────────────────────────────────────────
 with tab3:
     st.subheader("Optimización")
-    ready = st.session_state.returns is not None
+    ready = (st.session_state.returns is not None
+             and st.session_state.bench_rets is not None)
     if not ready:
         st.info("Descarga los datos en la pestaña 1 antes de optimizar.")
 
     if st.button("Optimizar portafolio", type="primary", disabled=not ready,
                  use_container_width=True):
+        primary_bench = list(st.session_state.bench_rets.values())[0]
         with st.spinner("Optimizando…"):
-            res = optimize(st.session_state.tickers, st.session_state.views, eq_t, fi_t)
+            res = optimize(st.session_state.tickers, st.session_state.views,
+                           eq_t, fi_t, primary_bench)
         st.session_state.result = res
         st.session_state.manual_weights = res.weights.copy()
         st.session_state.optimized = True
@@ -357,13 +393,9 @@ with tab3:
         else:
             st.warning(f"Solución con advertencias: {res.feasibility_report}")
 
-    if not ready:
-        pass
-
     if st.session_state.optimized and st.session_state.result is not None:
         res = st.session_state.result
 
-        # ── Métricas ex-ante (BL) ────────────────────────────────────────────
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Retorno esperado (BL)", f"{res.exp_return:.2%}")
         m2.metric("Volatilidad anual", f"{res.volatility:.2%}")
@@ -417,26 +449,38 @@ with tab3:
             fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0))
             st.plotly_chart(fig, use_container_width=True)
 
-        # ── Wealth index + drawdown ──────────────────────────────────────────
-        st.caption("Evolución de capital y drawdown")
-        pr, wealth, dd, bench_al, wb, dd_b = wealth_and_dd(
-            wnorm, st.session_state.returns, st.session_state.benchmark)
+        # ── Wealth index + drawdown (multi-benchmark) ────────────────────────
+        st.caption(f"Evolución de capital (base ${capital_inicial:,.0f}) y drawdown")
+        pr, wealth, dd, bwealths, bdds = wealth_and_dd(
+            wnorm, st.session_state.returns, st.session_state.bench_rets,
+            capital_inicial)
 
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                            row_heights=[0.7, 0.3], vertical_spacing=0.05)
+        # Portafolio
         fig.add_trace(go.Scatter(x=wealth.index, y=wealth.values, name="Portafolio",
-                                line=dict(color=COL_RV)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=wb.index, y=wb.values, name="Benchmark",
-                                line=dict(color=COL_BMK, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=dd.index, y=dd.values, name="Drawdown portafolio",
+                                line=dict(color=COL_RV, width=2)), row=1, col=1)
+        # Benchmarks
+        for idx, (bname, bw) in enumerate(bwealths.items()):
+            color = BMK_COLORS[idx % len(BMK_COLORS)]
+            fig.add_trace(go.Scatter(x=bw.index, y=bw.values, name=bname,
+                                    line=dict(color=color, dash="dash")), row=1, col=1)
+
+        # Drawdown portafolio
+        fig.add_trace(go.Scatter(x=dd.index, y=dd.values, name="DD portafolio",
                                 fill="tozeroy", line=dict(color=COL_OPT)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=dd_b.index, y=dd_b.values, name="Drawdown benchmark",
-                                line=dict(color=COL_BMK, dash="dot")), row=2, col=1)
+        # Drawdown benchmarks
+        for idx, (bname, bdd) in enumerate(bdds.items()):
+            color = BMK_COLORS[idx % len(BMK_COLORS)]
+            fig.add_trace(go.Scatter(x=bdd.index, y=bdd.values, name=f"DD {bname}",
+                                    line=dict(color=color, dash="dot", width=1)),
+                         row=2, col=1)
         fig.add_hline(y=-res.profile.max_drawdown, line_dash="dot",
                      line_color="black", row=2, col=1,
                      annotation_text=f"Límite {res.profile.max_drawdown:.0%}")
         fig.update_yaxes(tickformat=".0%", row=2, col=1)
-        fig.update_layout(height=480, margin=dict(l=0, r=0, t=10, b=0),
+        fig.update_yaxes(tickprefix="$", tickformat=",.0f", row=1, col=1)
+        fig.update_layout(height=500, margin=dict(l=0, r=0, t=10, b=0),
                          legend=dict(orientation="h", y=1.08))
         st.plotly_chart(fig, use_container_width=True)
 
@@ -454,7 +498,6 @@ with tab3:
         h4.metric("VaR 95%", f"{risk['VaR_param']:.2%}")
         h5.metric("CVaR 95%", f"{risk['CVaR_param']:.2%}")
 
-        # Tabla detallada de riesgo
         with st.expander("Detalle VaR / CVaR"):
             st.write("Valores anualizados al 95% de confianza.")
             risk_df = pd.DataFrame({
@@ -467,7 +510,6 @@ with tab3:
                 "CVaR: pérdida promedio en el peor 5% de escenarios."
             )
 
-        # ── Tabla de retornos BL vs equilibrio ───────────────────────────────
         with st.expander("Retornos BL posterior vs equilibrio"):
             bl_df = pd.DataFrame({
                 "Equilibrio (Π)": res.equilibrium,
