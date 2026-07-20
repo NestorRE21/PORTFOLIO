@@ -1,10 +1,11 @@
-# Versiones fijadas para evitar los conflictos numpy/pandas del entorno local.
-# Coril BL Optimizer — dependencias para Streamlit Community Cloud
-# SIN cvxpy: el motor usa scipy (ya incluido) como solver. Más estable de instalar.
-streamlit
-numpy<2.0
-pandas<2.2
-scipy
-scikit-learn
-yfinance
-plotly
+# Coril BL Optimizer — Streamlit Community Cloud (Python 3.14)
+# Versiones con wheels precompilados para Python 3.14 (no compilan desde fuente).
+# pandas >=2.3.3 es la primera compatible con 3.14; numpy >=2.3 y scipy/sklearn recientes.
+streamlit>=1.40
+numpy>=2.3
+pandas>=2.3.3
+scipy>=1.14
+scikit-learn>=1.6
+yfinance>=0.2.50
+plotly>=5.24
+ 
