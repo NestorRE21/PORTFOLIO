@@ -19,6 +19,7 @@ from plotly.subplots import make_subplots
 from optimizer import (
     RiskProfile, ForcedAsset, View, BLConfig, run_profile,
 )
+from projections import monte_carlo, stress_test, CRISIS_PERIODS
 
 # =============================================================================
 # CONFIGURACIÓN
@@ -269,7 +270,8 @@ st.title("Optimizador Black-Litterman")
 st.caption(f"Mandato: **{perfil_sel}** · {eq_t:.0%} RV / {fi_t:.0%} RF "
            f" · Inversión: ${capital_inicial:,.0f}")
 
-tab1, tab2, tab3 = st.tabs(["1 · Activos", "2 · Views", "3 · Optimización"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["1 · Activos", "2 · Views", "3 · Optimización", "4 · Proyecciones"])
 
 # ── TAB 1 ────────────────────────────────────────────────────────────────────
 with tab1:
@@ -544,3 +546,197 @@ with tab3:
                 "Equilibrio (Π)": "{:.2%}", "BL posterior": "{:.2%}",
                 "Δ (BL − Π)": "{:+.2%}", "Peso": "{:.2%}",
             }), use_container_width=True)
+
+# ── TAB 4: PROYECCIONES Y ESCENARIOS ────────────────────────────────────────
+with tab4:
+    st.subheader("Proyecciones y escenarios")
+
+    has_result = (st.session_state.optimized and st.session_state.result is not None
+                  and isinstance(st.session_state.bench_rets, dict))
+    if not has_result:
+        st.info("Primero optimiza el portafolio en la pestaña 3.")
+    else:
+        res = st.session_state.result
+        wnorm = st.session_state.manual_weights
+        if wnorm is None:
+            wnorm = res.weights
+
+        # ── Controles ────────────────────────────────────────────────────────
+        cc1, cc2, cc3 = st.columns(3)
+        mc_horizon = cc1.selectbox("Horizonte (años)", [1, 2, 3, 5, 10], index=2)
+        mc_sims    = cc2.selectbox("Simulaciones", [1000, 5000, 10000], index=1)
+        mc_target  = cc3.number_input(
+            "Capital objetivo (USD)", value=int(capital_inicial * 1.20),
+            step=10_000, format="%d",
+        )
+
+        run_mc = st.button("Correr Monte Carlo", type="primary",
+                           use_container_width=True)
+
+        if run_mc:
+            with st.spinner(f"Simulando {mc_sims:,} trayectorias a {mc_horizon} años…"):
+                mc = monte_carlo(
+                    weights=wnorm, mu_bl=res.bl_returns, cov_bl=res.cov_matrix,
+                    capital=capital_inicial, horizon_years=mc_horizon,
+                    periods_per_year=PPY, n_sims=mc_sims, target=mc_target,
+                )
+            st.session_state["mc_result"] = mc
+
+        if "mc_result" in st.session_state and st.session_state["mc_result"] is not None:
+            mc = st.session_state["mc_result"]
+
+            # ── Métricas MC ──────────────────────────────────────────────────
+            st.markdown("### Monte Carlo")
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Mediana final", f"${mc.median_path[-1]:,.0f}")
+            m2.metric("P(pérdida)", f"{mc.prob_loss:.1%}")
+            m3.metric(f"P(≥${mc.target:,.0f})", f"{mc.prob_target:.1%}")
+            m4.metric("VaR 95%", f"${mc.var_terminal:,.0f}")
+            m5.metric("CVaR 95%", f"${mc.cvar_terminal:,.0f}")
+
+            # ── Gráfico de abanico ───────────────────────────────────────────
+            fig = go.Figure()
+            x = mc.dates
+
+            # Bandas de confianza (P5-P95, P10-P90, P25-P75)
+            bands = [(5, 95, "rgba(46,94,140,0.08)"),
+                     (10, 90, "rgba(46,94,140,0.12)"),
+                     (25, 75, "rgba(46,94,140,0.18)")]
+            for lo, hi, color in bands:
+                fig.add_trace(go.Scatter(
+                    x=list(x)+list(x[::-1]),
+                    y=list(mc.percentiles[hi])+list(mc.percentiles[lo][::-1]),
+                    fill="toself", fillcolor=color,
+                    line=dict(width=0), showlegend=True,
+                    name=f"P{lo}–P{hi}",
+                ))
+
+            fig.add_trace(go.Scatter(
+                x=x, y=mc.median_path, name="Mediana",
+                line=dict(color="#2E5E8C", width=2.5)))
+            fig.add_trace(go.Scatter(
+                x=x, y=mc.mean_path, name="Media",
+                line=dict(color="#D6604D", width=1.5, dash="dash")))
+            fig.add_hline(y=mc.capital, line_dash="dot", line_color="gray",
+                         annotation_text=f"Capital inicial ${mc.capital:,.0f}")
+            if mc.target != mc.capital:
+                fig.add_hline(y=mc.target, line_dash="dot", line_color="#2CA02C",
+                             annotation_text=f"Objetivo ${mc.target:,.0f}")
+
+            fig.update_yaxes(tickprefix="$", tickformat=",.0f")
+            fig.update_layout(
+                height=480, margin=dict(l=0, r=0, t=30, b=0),
+                title=f"Monte Carlo — {mc_sims:,} trayectorias, {mc_horizon} años",
+                legend=dict(orientation="h", y=-0.1),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ── Distribución terminal ────────────────────────────────────────
+            with st.expander("Distribución del capital final"):
+                fig2 = go.Figure(go.Histogram(
+                    x=mc.terminal, nbinsx=60,
+                    marker_color="#2E5E8C", opacity=0.7,
+                ))
+                fig2.add_vline(x=mc.capital, line_dash="dot", line_color="gray",
+                              annotation_text="Capital inicial")
+                fig2.add_vline(x=np.median(mc.terminal), line_dash="solid",
+                              line_color="#D6604D", annotation_text="Mediana")
+                fig2.update_xaxes(tickprefix="$", tickformat=",.0f")
+                fig2.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
+                                   showlegend=False)
+                st.plotly_chart(fig2, use_container_width=True)
+
+                pct_df = pd.DataFrame({
+                    "Percentil": ["P5", "P10", "P25", "P50 (mediana)", "P75", "P90", "P95"],
+                    "Capital final": [f"${mc.percentiles[p][-1]:,.0f}" for p in [5,10,25,50,75,90,95]],
+                    "Retorno total": [f"{mc.percentiles[p][-1]/mc.capital - 1:.1%}" for p in [5,10,25,50,75,90,95]],
+                })
+                st.dataframe(pct_df, use_container_width=True, hide_index=True)
+
+        # ── STRESS TESTING ───────────────────────────────────────────────────
+        st.divider()
+        st.markdown("### Stress Testing histórico")
+        st.caption("Impacto de crisis históricas en el portafolio actual.")
+
+        if st.button("Correr stress test", use_container_width=True):
+            primary_bench = list(st.session_state.bench_rets.values())[0]
+            with st.spinner("Aplicando escenarios…"):
+                stress = stress_test(
+                    weights=wnorm, returns=st.session_state.returns,
+                    crises=CRISIS_PERIODS, capital=capital_inicial,
+                    forced_assets={FICO_TICKER: FICO},
+                    periods_per_year=PPY, benchmark=primary_bench,
+                )
+            st.session_state["stress_result"] = stress
+
+        if "stress_result" in st.session_state and st.session_state["stress_result"]:
+            stress = st.session_state["stress_result"]
+            available = [s for s in stress if s.available]
+
+            if not available:
+                st.warning("Ningún período de crisis tiene datos en tu rango histórico.")
+            else:
+                # Tabla resumen
+                rows = []
+                for s in available:
+                    rows.append({
+                        "Escenario": s.name,
+                        "Período": f"{s.start} → {s.end}",
+                        "Semanas": s.n_periods,
+                        "Ret. portafolio": s.port_return,
+                        "Pérdida (USD)": s.port_loss,
+                        "Max drawdown": s.max_drawdown,
+                        "Ret. benchmark": s.benchmark_return,
+                    })
+                sdf = pd.DataFrame(rows)
+                st.dataframe(
+                    sdf.style.format({
+                        "Ret. portafolio": "{:.2%}",
+                        "Pérdida (USD)": "${:,.0f}",
+                        "Max drawdown": "{:.2%}",
+                        "Ret. benchmark": "{:.2%}",
+                    }).map(
+                        lambda v: "color: #D6604D" if isinstance(v, (int, float)) and v < 0 else "",
+                        subset=["Ret. portafolio", "Pérdida (USD)"],
+                    ),
+                    use_container_width=True, hide_index=True,
+                )
+
+                # Gráfico de barras comparativo
+                fig3 = go.Figure()
+                names = [s.name for s in available]
+                fig3.add_trace(go.Bar(
+                    x=names, y=[s.port_return for s in available],
+                    name="Portafolio", marker_color="#D6604D",
+                ))
+                fig3.add_trace(go.Bar(
+                    x=names, y=[s.benchmark_return for s in available],
+                    name="Benchmark", marker_color="#888888",
+                ))
+                fig3.update_yaxes(tickformat=".1%")
+                fig3.update_layout(
+                    barmode="group", height=350,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    legend=dict(orientation="h", y=1.08),
+                )
+                st.plotly_chart(fig3, use_container_width=True)
+
+                # Detalle por escenario
+                with st.expander("Detalle por escenario"):
+                    for s in available:
+                        st.markdown(f"**{s.name}** ({s.start} → {s.end})")
+                        st.caption(s.description)
+                        ar = s.asset_returns
+                        if not ar.empty:
+                            st.dataframe(
+                                ar.rename("Retorno").to_frame().style.format("{:.2%}"),
+                                use_container_width=True,
+                            )
+                        st.divider()
+
+            # Crisis sin datos
+            missing = [s for s in stress if not s.available]
+            if missing:
+                with st.expander(f"{len(missing)} escenarios sin datos en tu rango"):
+                    for s in missing:
+                        st.caption(f"**{s.name}** ({s.start} → {s.end}): {s.description}")
