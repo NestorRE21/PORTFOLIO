@@ -53,7 +53,7 @@ def init_state():
     defaults = {
         "tickers": [], "benchmarks": ["^GSPC"], "views": [],
         "optimized": False, "result": None, "manual_weights": None,
-        "returns": None, "bench_rets": None, "betas": None,
+        "returns": None, "bench_rets": None, "betas": None, "sectors": None,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -123,6 +123,20 @@ def calc_betas(returns, bench_ret):
         else:
             betas[tk] = 1.0
     return pd.Series(betas)
+
+
+@st.cache_data(show_spinner=False)
+def fetch_sectors(tickers):
+    """Obtiene sector de Yahoo Finance para cada ticker."""
+    import yfinance as yf
+    sectors = {}
+    for tk in tickers:
+        try:
+            info = yf.Ticker(tk).info
+            sectors[tk] = info.get("sector", "Sin clasificar")
+        except Exception:
+            sectors[tk] = "Sin clasificar"
+    return pd.Series(sectors)
 
 
 def optimize(tickers, views_cfg, equity_target, fico_target, primary_bench):
@@ -330,7 +344,12 @@ with tab1:
                 betas = calc_betas(log_ret.loc[common], primary.loc[common])
                 st.session_state.betas = betas
 
-                ok = [t for t in st.session_state.tickers if t in log_ret.columns]
+                # Sectores de Yahoo
+                with st.spinner("Obteniendo sectores…"):
+                    ok = [t for t in st.session_state.tickers if t in log_ret.columns]
+                    sectors = fetch_sectors(tuple(ok))
+                    sectors[FICO_TICKER] = FICO.sector
+                    st.session_state.sectors = sectors
                 st.success(f"{len(common)} semanas × {len(ok)} activos · "
                            f"{len(bench_dict)} benchmark(s).")
                 falt = set(st.session_state.tickers) - set(ok)
@@ -454,7 +473,7 @@ with tab3:
 
         # ── Gráficos ─────────────────────────────────────────────────────────
         st.divider()
-        g1, g2 = st.columns(2)
+        g1, g2, g3 = st.columns(3)
 
         with g1:
             st.caption("Composición del portafolio")
@@ -473,6 +492,24 @@ with tab3:
                                    marker_colors=[COL_RV, COL_RF], hole=0.5))
             fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0))
             st.plotly_chart(fig, use_container_width=True)
+
+        with g3:
+            st.caption("Exposición por sector")
+            sectors = st.session_state.sectors
+            if sectors is not None and not sectors.empty:
+                # Agrupar pesos por sector
+                sector_weights = {}
+                for asset in wnorm.index:
+                    if wnorm[asset] > 1e-4:
+                        sec = sectors.get(asset, "Sin clasificar")
+                        sector_weights[sec] = sector_weights.get(sec, 0.0) + wnorm[asset]
+                sec_labels = list(sector_weights.keys())
+                sec_values = list(sector_weights.values())
+                fig = go.Figure(go.Pie(labels=sec_labels, values=sec_values, hole=0.5))
+                fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Descarga datos para ver sectores.")
 
         # ── Wealth index + drawdown (multi-benchmark) ────────────────────────
         st.caption(f"Evolución de capital (base ${capital_inicial:,.0f}) y drawdown")
