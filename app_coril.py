@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Coril SAB — Optimizador de Portafolios Black-Litterman
-Interfaz comercial (Streamlit) — MOTOR INTEGRADO
+Interfaz comercial (Streamlit) — MOTOR INTEGRADO v2
 
 Requiere: optimizer.py en la misma carpeta.
-Desplegar en Streamlit Community Cloud con el requirements.txt incluido.
-Local:  streamlit run app_coril.py
 """
 
 import numpy as np
@@ -25,15 +23,13 @@ st.set_page_config(page_title="Coril · Optimizador BL", page_icon="📈",
                    layout="wide", initial_sidebar_state="expanded")
 
 RF_ANNUAL   = 0.02
-PPY         = 52          # periods per year (semanal)
+PPY         = 52
 
-# FICO forzado a 6.5%
 FICO_TICKER = "FICCMP13"
 FICO = ForcedAsset(ret_annual=0.065, vol_annual=0.010, beta=0.30,
                    sector="Factoring", region="Perú", moneda="USD",
                    instrumento="Fondo de inversión")
 
-# Los 5 perfiles comerciales
 PERFILES = {
     "Perfil A (30/70)": (0.30, 0.70),
     "Perfil B (40/60)": (0.40, 0.60),
@@ -59,11 +55,11 @@ def init_state():
 init_state()
 
 # =============================================================================
-# DATOS (yfinance) — cacheado
+# DATOS (yfinance)
 # =============================================================================
 @st.cache_data(show_spinner=False)
 def load_data(tickers, benchmark, period="5y", interval="1wk"):
-    """Descarga precios, retorna (log_returns, benchmark_returns, betas)."""
+    """Descarga precios, calcula log-returns, betas por regresión y Yahoo."""
     import yfinance as yf
 
     def _prices(raw, tk_list):
@@ -76,6 +72,7 @@ def load_data(tickers, benchmark, period="5y", interval="1wk"):
         px.index = pd.to_datetime(px.index).tz_localize(None)
         return px
 
+    # --- Precios equity ---
     raw = yf.download(tickers, period=period, interval=interval,
                       auto_adjust=True, progress=False)
     if raw is None or raw.empty:
@@ -83,6 +80,7 @@ def load_data(tickers, benchmark, period="5y", interval="1wk"):
     px = _prices(raw, tickers)
     log_ret = np.log(px / px.shift(1)).replace([np.inf, -np.inf], np.nan).dropna(how="all")
 
+    # --- Benchmark ---
     rawb = yf.download(benchmark, period=period, interval=interval,
                        auto_adjust=True, progress=False)
     if isinstance(rawb.columns, pd.MultiIndex):
@@ -94,15 +92,41 @@ def load_data(tickers, benchmark, period="5y", interval="1wk"):
     bench_ret = np.log(pb / pb.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
     bench_ret.name = benchmark
 
-    # betas de Yahoo con fallback
+    # --- Betas: regresión OLS contra benchmark (más fiable que Yahoo .info) ---
+    common = log_ret.index.intersection(bench_ret.index)
     betas = {}
+    bmk_vals = bench_ret.loc[common].values
+    bmk_var = np.var(bmk_vals, ddof=1)
+    for tk in tickers:
+        if tk not in log_ret.columns:
+            betas[tk] = 1.0
+            continue
+        tk_vals = log_ret.loc[common, tk].values
+        mask = np.isfinite(tk_vals) & np.isfinite(bmk_vals)
+        if mask.sum() > 10 and bmk_var > 1e-12:
+            cov = np.cov(tk_vals[mask], bmk_vals[mask], ddof=1)[0, 1]
+            b = cov / bmk_var
+            betas[tk] = round(float(b), 3) if np.isfinite(b) and b > 0 else 1.0
+        else:
+            betas[tk] = 1.0
+
+    # --- Intento secundario: Yahoo .info como referencia (no bloqueante) ---
+    yahoo_betas = {}
     for tk in tickers:
         try:
-            b = yf.Ticker(tk).info.get("beta", None)
-            betas[tk] = float(b) if (b and np.isfinite(b) and b > 0) else 1.0
+            info = yf.Ticker(tk).info
+            yb = info.get("beta", None)
+            if yb and np.isfinite(yb) and yb > 0:
+                yahoo_betas[tk] = round(float(yb), 3)
         except Exception:
-            betas[tk] = 1.0
-    return log_ret, bench_ret, pd.Series(betas)
+            pass
+
+    beta_df = pd.DataFrame({
+        "Regresión": pd.Series(betas),
+        "Yahoo": pd.Series(yahoo_betas),
+    })
+    # Usar regresión como principal (más consistente con nuestros datos semanales)
+    return log_ret, bench_ret, pd.Series(betas), beta_df
 
 
 def optimize(tickers, views_cfg, equity_target, fico_target):
@@ -133,15 +157,59 @@ def optimize(tickers, views_cfg, equity_target, fico_target):
     )
 
 
-def wealth_and_dd(weights, returns):
-    w = weights.reindex(returns.columns).fillna(0.0)
-    cols = returns.columns.intersection(w.index)
-    pr = returns[cols] @ w[cols]
-    if FICO_TICKER in weights.index:
-        pr = pr + weights[FICO_TICKER] * (np.log(1 + FICO.ret_annual) / PPY)
-    wealth = np.exp(pr.cumsum()) * 100
-    dd = wealth / wealth.cummax() - 1.0
-    return pr, wealth, dd
+def wealth_and_dd(weights, returns, benchmark):
+    """Calcula wealth index, drawdown y retornos del portafolio, alineados."""
+    # Solo columnas que existen en returns
+    eq_cols = [a for a in weights.index if a in returns.columns and a != FICO_TICKER]
+    w_eq = weights.reindex(eq_cols).fillna(0.0)
+
+    # Retorno del portafolio = suma de (peso × retorno) de cada activo
+    port_ret = pd.Series(0.0, index=returns.index)
+    for col in eq_cols:
+        port_ret = port_ret + w_eq[col] * returns[col].fillna(0.0)
+
+    # Añadir contribución constante del FICO
+    if FICO_TICKER in weights.index and weights[FICO_TICKER] > 1e-8:
+        fico_per = np.log(1 + FICO.ret_annual) / PPY
+        port_ret = port_ret + weights[FICO_TICKER] * fico_per
+
+    # Limpiar NaN residuales
+    port_ret = port_ret.fillna(0.0)
+
+    # Alinear benchmark
+    common = port_ret.index.intersection(benchmark.index)
+    port_ret = port_ret.loc[common]
+    bench_aligned = benchmark.loc[common].fillna(0.0)
+
+    wealth = np.exp(port_ret.cumsum()) * 100
+    wb     = np.exp(bench_aligned.cumsum()) * 100
+    dd     = wealth / wealth.cummax() - 1.0
+    dd_b   = wb / wb.cummax() - 1.0
+
+    return port_ret, wealth, dd, bench_aligned, wb, dd_b
+
+
+def calc_var_cvar(returns_series, confidence=0.95):
+    """VaR y CVaR paramétrico y histórico (anualizado, semanal→anual)."""
+    clean = returns_series.dropna()
+    if len(clean) < 10:
+        return {"VaR_hist": np.nan, "CVaR_hist": np.nan,
+                "VaR_param": np.nan, "CVaR_param": np.nan}
+    from scipy.stats import norm
+    mu  = clean.mean() * PPY
+    sig = clean.std(ddof=1) * np.sqrt(PPY)
+    alpha = 1 - confidence
+    # Paramétrico (normal)
+    z = norm.ppf(alpha)
+    var_param  = -(mu + z * sig)
+    cvar_param = -(mu - sig * norm.pdf(z) / alpha)
+    # Histórico
+    ann_rets = clean * PPY  # escala semanal a anual (aproximación lineal)
+    var_hist  = -float(np.percentile(ann_rets, alpha * 100))
+    cvar_hist = -float(ann_rets[ann_rets <= -var_hist].mean()) if (ann_rets <= -var_hist).any() else var_hist
+    return {"VaR_hist": var_hist, "CVaR_hist": cvar_hist,
+            "VaR_param": var_param, "CVaR_param": cvar_param}
+
 
 # =============================================================================
 # SIDEBAR
@@ -205,10 +273,11 @@ with tab1:
     if st.button("Descargar datos", disabled=not st.session_state.tickers,
                  type="primary"):
         with st.spinner("Descargando de Yahoo Finance…"):
-            r, b, be = load_data(tuple(st.session_state.tickers), benchmark_ticker)
-        if r is None or r.empty:
+            result = load_data(tuple(st.session_state.tickers), benchmark_ticker)
+        if result[0] is None:
             st.error("No se pudieron descargar datos. Verifica los tickers.")
         else:
+            r, b, be, beta_df = result
             common = r.index.intersection(b.index)
             st.session_state.returns   = r.loc[common]
             st.session_state.benchmark = b.loc[common]
@@ -218,8 +287,8 @@ with tab1:
             falt = set(st.session_state.tickers) - set(ok)
             if falt:
                 st.warning(f"Sin datos (ignorados): {falt}")
-            st.write("**Betas obtenidos:**")
-            st.dataframe(be.rename("beta").to_frame().T, use_container_width=True)
+            st.write("**Betas calculados:**")
+            st.dataframe(beta_df.style.format("{:.3f}"), use_container_width=True)
 
 # ── TAB 2: VIEWS ───────────────────────────────────────────────────────────────
 with tab2:
@@ -288,9 +357,13 @@ with tab3:
         else:
             st.warning(f"Solución con advertencias: {res.feasibility_report}")
 
+    if not ready:
+        pass
+
     if st.session_state.optimized and st.session_state.result is not None:
         res = st.session_state.result
 
+        # ── Métricas ex-ante (BL) ────────────────────────────────────────────
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Retorno esperado (BL)", f"{res.exp_return:.2%}")
         m2.metric("Volatilidad anual", f"{res.volatility:.2%}")
@@ -327,7 +400,7 @@ with tab3:
         g1, g2 = st.columns(2)
 
         with g1:
-            st.caption("Composición")
+            st.caption("Composición del portafolio")
             wshow = wnorm[wnorm > 1e-4]
             colors = [COL_RF if a == FICO_TICKER else COL_RV for a in wshow.index]
             fig = go.Figure(go.Bar(x=wshow.values, y=wshow.index, orientation="h",
@@ -344,32 +417,65 @@ with tab3:
             fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0))
             st.plotly_chart(fig, use_container_width=True)
 
+        # ── Wealth index + drawdown ──────────────────────────────────────────
         st.caption("Evolución de capital y drawdown")
-        pr, wealth, dd = wealth_and_dd(wnorm, st.session_state.returns)
-        bench = st.session_state.benchmark.loc[wealth.index]
-        wb = np.exp(bench.cumsum()) * 100
+        pr, wealth, dd, bench_al, wb, dd_b = wealth_and_dd(
+            wnorm, st.session_state.returns, st.session_state.benchmark)
+
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                            row_heights=[0.7, 0.3], vertical_spacing=0.05)
         fig.add_trace(go.Scatter(x=wealth.index, y=wealth.values, name="Portafolio",
                                 line=dict(color=COL_RV)), row=1, col=1)
         fig.add_trace(go.Scatter(x=wb.index, y=wb.values, name="Benchmark",
                                 line=dict(color=COL_BMK, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=dd.index, y=dd.values, name="Drawdown",
+        fig.add_trace(go.Scatter(x=dd.index, y=dd.values, name="Drawdown portafolio",
                                 fill="tozeroy", line=dict(color=COL_OPT)), row=2, col=1)
+        fig.add_trace(go.Scatter(x=dd_b.index, y=dd_b.values, name="Drawdown benchmark",
+                                line=dict(color=COL_BMK, dash="dot")), row=2, col=1)
         fig.add_hline(y=-res.profile.max_drawdown, line_dash="dot",
-                     line_color="black", row=2, col=1)
+                     line_color="black", row=2, col=1,
+                     annotation_text=f"Límite {res.profile.max_drawdown:.0%}")
         fig.update_yaxes(tickformat=".0%", row=2, col=1)
-        fig.update_layout(height=450, margin=dict(l=0, r=0, t=10, b=0),
-                         legend=dict(orientation="h", y=1.1))
+        fig.update_layout(height=480, margin=dict(l=0, r=0, t=10, b=0),
+                         legend=dict(orientation="h", y=1.08))
         st.plotly_chart(fig, use_container_width=True)
 
-        # ── Métricas ex-post ─────────────────────────────────────────────────
+        # ── Métricas ex-post + VaR/CVaR ──────────────────────────────────────
         ann_ret = np.exp(pr.mean() * PPY) - 1
         ann_vol = pr.std(ddof=1) * np.sqrt(PPY)
+        risk = calc_var_cvar(pr, confidence=0.95)
+
         st.divider()
         st.subheader("Métricas históricas (ex-post)")
-        h1, h2, h3 = st.columns(3)
+        h1, h2, h3, h4, h5 = st.columns(5)
         h1.metric("Retorno anualizado", f"{ann_ret:.2%}")
         h2.metric("Volatilidad anual", f"{ann_vol:.2%}")
-        h3.metric("Máx. drawdown", f"{dd.min():.2%}",
-                 delta=f"límite {res.profile.max_drawdown:.0%}", delta_color="off")
+        h3.metric("Máx. drawdown", f"{dd.min():.2%}")
+        h4.metric("VaR 95%", f"{risk['VaR_param']:.2%}")
+        h5.metric("CVaR 95%", f"{risk['CVaR_param']:.2%}")
+
+        # Tabla detallada de riesgo
+        with st.expander("Detalle VaR / CVaR"):
+            st.write("Valores anualizados al 95% de confianza.")
+            risk_df = pd.DataFrame({
+                "Paramétrico (Normal)": [risk["VaR_param"], risk["CVaR_param"]],
+                "Histórico": [risk["VaR_hist"], risk["CVaR_hist"]],
+            }, index=["VaR 95%", "CVaR 95%"])
+            st.dataframe(risk_df.style.format("{:.2%}"), use_container_width=True)
+            st.caption(
+                "VaR: pérdida máxima esperada en el 95% de los escenarios. "
+                "CVaR: pérdida promedio en el peor 5% de escenarios."
+            )
+
+        # ── Tabla de retornos BL vs equilibrio ───────────────────────────────
+        with st.expander("Retornos BL posterior vs equilibrio"):
+            bl_df = pd.DataFrame({
+                "Equilibrio (Π)": res.equilibrium,
+                "BL posterior": res.bl_returns,
+                "Δ (BL − Π)": res.bl_returns - res.equilibrium,
+                "Peso": res.weights,
+            }).sort_values("Peso", ascending=False)
+            st.dataframe(bl_df.style.format({
+                "Equilibrio (Π)": "{:.2%}", "BL posterior": "{:.2%}",
+                "Δ (BL − Π)": "{:+.2%}", "Peso": "{:.2%}",
+            }), use_container_width=True)
