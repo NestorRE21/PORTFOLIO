@@ -54,6 +54,7 @@ def init_state():
         "tickers": [], "views": [],
         "optimized": False, "result": None, "manual_weights": None,
         "returns": None, "bench_rets": None, "betas": None, "sectors": None,
+        "downloaded_period": None, "data_range": "",
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -63,7 +64,7 @@ init_state()
 # =============================================================================
 # DATOS
 # =============================================================================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=600)
 def download_equity(tickers, period="5y", interval="1wk"):
     """Descarga precios equity y retorna log-returns."""
     import yfinance as yf
@@ -81,7 +82,7 @@ def download_equity(tickers, period="5y", interval="1wk"):
     return np.log(px / px.shift(1)).replace([np.inf, -np.inf], np.nan).dropna(how="all")
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=600)
 def download_benchmarks(bench_tickers, period="5y", interval="1wk"):
     """Descarga uno o más benchmarks, retorna dict de {ticker: Series}."""
     import yfinance as yf
@@ -125,7 +126,7 @@ def calc_betas(returns, bench_ret):
     return pd.Series(betas)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=600)
 def fetch_sectors(tickers):
     """Obtiene sector de Yahoo Finance para cada ticker."""
     import yfinance as yf
@@ -259,20 +260,33 @@ with st.sidebar:
         value=100_000, step=1_000, format="$%d",
     )
 
+    # Aviso si el período cambió desde la última descarga
+    if (st.session_state.downloaded_period
+            and st.session_state.downloaded_period != data_period):
+        st.warning(f"Período cambió de {st.session_state.downloaded_period} "
+                   f"a {data_period}. Pulsa **Descargar datos**.")
+
     st.divider()
     st.subheader("Benchmarks")
-    benchmarks_raw = st.text_input(
-        "Tickers separados por coma",
-        value="^GSPC",
-        help="Escribe los benchmarks separados por coma. "
-             "Ej: ^GSPC, SPY, QQQ. Pulsa Enter para confirmar.",
+    benchmarks_raw = st.text_area(
+        "Un benchmark por línea",
+        value="^GSPC\nSPY",
+        height=100,
+        help="Escribe un ticker por línea. Todos se descargan al pulsar "
+             "'Descargar datos'. Ej: ^GSPC, SPY, QQQ, EEM.",
     )
-    benchmarks_list = [b.strip().upper() for b in benchmarks_raw.split(",")
+    benchmarks_list = [b.strip().upper() for b in benchmarks_raw.split("\n")
                        if b.strip()]
     if benchmarks_list:
-        st.caption(f"Activos: **{', '.join(benchmarks_list)}**")
+        st.caption(f"{len(benchmarks_list)} benchmark(s): "
+                   f"**{', '.join(benchmarks_list)}**")
     else:
         st.warning("Escribe al menos un benchmark.")
+
+    if st.button("Limpiar caché", use_container_width=True,
+                 help="Fuerza re-descarga en el siguiente clic de Descargar datos."):
+        st.cache_data.clear()
+        st.success("Caché limpiado.")
 
 # =============================================================================
 # CUERPO
@@ -307,13 +321,19 @@ with tab1:
         st.info("Añade al menos un ticker de renta variable.")
 
     st.divider()
-    st.caption(f"**Descargará:** {len(st.session_state.tickers)} activos · "
+
+    # Info de datos actualmente cargados
+    if st.session_state.data_range:
+        st.caption(f"📦 **Datos cargados:** {st.session_state.data_range} "
+                   f"(período: {st.session_state.downloaded_period})")
+
+    st.caption(f"**Próxima descarga:** {len(st.session_state.tickers)} activos · "
                f"{len(benchmarks_list)} benchmark(s) · período: {data_period}")
 
-    # Detectar si benchmarks cambiaron desde última descarga
+    # Detectar cambios desde última descarga
     if (isinstance(st.session_state.bench_rets, dict)
             and set(st.session_state.bench_rets.keys()) != set(benchmarks_list)):
-        st.warning("Los benchmarks cambiaron. Pulsa Descargar datos para actualizar.")
+        st.warning("⚠️ Los benchmarks cambiaron. Pulsa Descargar datos para actualizar.")
 
     if st.button("Descargar datos",
                  disabled=(not st.session_state.tickers or not benchmarks_list),
@@ -349,8 +369,16 @@ with tab1:
                     sectors = fetch_sectors(tuple(ok))
                     sectors[FICO_TICKER] = FICO.sector
                     st.session_state.sectors = sectors
-                st.success(f"{len(common)} semanas × {len(ok)} activos · "
-                           f"{len(bench_dict)} benchmark(s).")
+
+                # Guardar metadata de la descarga
+                st.session_state.downloaded_period = data_period
+                date_min = st.session_state.returns.index.min().strftime("%Y-%m-%d")
+                date_max = st.session_state.returns.index.max().strftime("%Y-%m-%d")
+                st.session_state.data_range = f"{date_min} → {date_max}"
+
+                st.success(f"✅ {len(common)} semanas × {len(ok)} activos · "
+                           f"{len(bench_dict)} benchmark(s) · "
+                           f"Rango: **{date_min}** → **{date_max}**")
                 falt = set(st.session_state.tickers) - set(ok)
                 if falt:
                     st.warning(f"Sin datos (ignorados): {falt}")
@@ -711,6 +739,10 @@ with tab4:
         st.divider()
         st.markdown("### Stress Testing histórico")
         st.caption("Impacto de crisis históricas en el portafolio actual.")
+        if st.session_state.data_range:
+            st.caption(f"📅 Datos disponibles: **{st.session_state.data_range}** "
+                       f"(período: {st.session_state.downloaded_period}). "
+                       f"Las crisis fuera de este rango aparecerán como 'sin datos'.")
 
         if st.button("Correr stress test", use_container_width=True):
             primary_bench = list(st.session_state.bench_rets.values())[0]
