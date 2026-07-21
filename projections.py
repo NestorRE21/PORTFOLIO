@@ -38,19 +38,31 @@ class CrisisPeriod:
 # Crisis predefinidas (el usuario puede añadir las suyas)
 CRISIS_PERIODS = [
     CrisisPeriod("COVID-19", "2020-02-19", "2020-03-23",
-                 "Caída por pandemia global. S&P 500 -34% en 23 días."),
+                 "Pandemia global. El S&P 500 cayó ~34% en 23 días de negociación, "
+                 "el desplome más rápido de la historia. Pánico de liquidez, "
+                 "circuit breakers activados varias veces. Recuperación en V posterior."),
     CrisisPeriod("Taper Tantrum 2013", "2013-05-22", "2013-06-24",
-                 "Bernanke señala reducción de QE. Emergentes golpeados."),
+                 "Bernanke anunció que la Fed reduciría su programa de compra de bonos (QE). "
+                 "Los rendimientos del Tesoro se dispararon, y los mercados emergentes "
+                 "sufrieron salidas masivas de capital y devaluaciones."),
     CrisisPeriod("Sell-off Q4 2018", "2018-10-01", "2018-12-24",
-                 "Temores de subida de tasas + guerra comercial."),
-    CrisisPeriod("Flash Crash 2020", "2020-02-19", "2020-02-28",
-                 "Primera semana de pánico COVID, antes del fondo."),
-    CrisisPeriod("Russia-Ukraine 2022", "2022-02-18", "2022-03-08",
-                 "Invasión de Ucrania. Commodities y mercados volátiles."),
-    CrisisPeriod("SVB / Banking 2023", "2023-03-08", "2023-03-15",
-                 "Colapso de Silicon Valley Bank. Contagio bancario."),
-    CrisisPeriod("Yen Carry Unwind 2024", "2024-07-31", "2024-08-05",
-                 "Subida del BOJ + unwind de carry trade en yen."),
+                 "Corrección del ~20% en el S&P 500. Combinación de subidas de tasas de la Fed, "
+                 "guerra comercial EE.UU.-China y temores de desaceleración global. "
+                 "Fondo el 24 de diciembre, rebote fuerte en 2019."),
+    CrisisPeriod("Flash Crash COVID", "2020-02-19", "2020-02-28",
+                 "Primera semana del desplome COVID, antes de tocar fondo. "
+                 "Caída inicial de pánico de ~13% en una semana."),
+    CrisisPeriod("Rusia-Ucrania 2022", "2022-02-18", "2022-03-08",
+                 "Invasión rusa de Ucrania. Shock en commodities (petróleo, gas, trigo), "
+                 "volatilidad extrema, huida a activos refugio. Impacto fuerte en Europa."),
+    CrisisPeriod("Crisis bancaria SVB 2023", "2023-03-08", "2023-03-15",
+                 "Colapso de Silicon Valley Bank en 48 horas, el mayor desde 2008. "
+                 "Contagio a Signature Bank y Credit Suisse. Temor de crisis bancaria "
+                 "sistémica, intervención de reguladores."),
+    CrisisPeriod("Unwind Yen Carry 2024", "2024-07-31", "2024-08-05",
+                 "El Banco de Japón subió tasas inesperadamente, provocando el "
+                 "desarme del carry trade en yenes. El Nikkei cayó 12% en un día, "
+                 "contagio global de volatilidad."),
 ]
 
 
