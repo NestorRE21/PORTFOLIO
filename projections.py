@@ -38,31 +38,42 @@ class CrisisPeriod:
 # Crisis predefinidas (el usuario puede añadir las suyas)
 CRISIS_PERIODS = [
     CrisisPeriod("COVID-19", "2020-02-19", "2020-03-23",
-                 "Pandemia global. El S&P 500 cayó ~34% en 23 días de negociación, "
-                 "el desplome más rápido de la historia. Pánico de liquidez, "
-                 "circuit breakers activados varias veces. Recuperación en V posterior."),
+                 "Pandemia global. S&P 500 cayó ~34% en 23 días. "
+                 "VIX saltó de 14 a 82. Fed recortó tasas de 1.75% a 0-0.25% "
+                 "en dos movimientos de emergencia. Tasa a 10 años cayó de 1.56% "
+                 "a 0.54%. Crédito HY se amplió +600 bps. Petróleo WTI colapsó "
+                 "de $53 a $22/barril."),
     CrisisPeriod("Taper Tantrum 2013", "2013-05-22", "2013-06-24",
-                 "Bernanke anunció que la Fed reduciría su programa de compra de bonos (QE). "
-                 "Los rendimientos del Tesoro se dispararon, y los mercados emergentes "
-                 "sufrieron salidas masivas de capital y devaluaciones."),
+                 "Bernanke anunció reducción de QE. Tasa 10Y subió de 1.93% a 2.59% "
+                 "(+66 bps en un mes). Emergentes: MSCI EM cayó ~15%, monedas como "
+                 "la rupia india y el real brasileño se depreciaron 8-12%. S&P 500 "
+                 "solo cayó ~6% y recuperó rápido."),
     CrisisPeriod("Sell-off Q4 2018", "2018-10-01", "2018-12-24",
-                 "Corrección del ~20% en el S&P 500. Combinación de subidas de tasas de la Fed, "
-                 "guerra comercial EE.UU.-China y temores de desaceleración global. "
-                 "Fondo el 24 de diciembre, rebote fuerte en 2019."),
+                 "S&P 500 cayó ~20% en 3 meses. Fed subía tasas (de 2.00% a 2.50%). "
+                 "Guerra comercial EE.UU.-China: aranceles del 25% a $200B en bienes. "
+                 "VIX pasó de 12 a 36. Tasa 10Y bajó de 3.23% a 2.73% (flight to "
+                 "quality). Spread HY se amplió +200 bps."),
     CrisisPeriod("Flash Crash COVID", "2020-02-19", "2020-02-28",
-                 "Primera semana del desplome COVID, antes de tocar fondo. "
-                 "Caída inicial de pánico de ~13% en una semana."),
+                 "Primera semana del desplome COVID. S&P 500 cayó ~13% en 7 días "
+                 "hábiles. Fue la caída semanal más rápida desde 2008. VIX pasó "
+                 "de 14 a 40. Aún no había intervención de la Fed."),
     CrisisPeriod("Rusia-Ucrania 2022", "2022-02-18", "2022-03-08",
-                 "Invasión rusa de Ucrania. Shock en commodities (petróleo, gas, trigo), "
-                 "volatilidad extrema, huida a activos refugio. Impacto fuerte en Europa."),
+                 "Invasión rusa de Ucrania. Petróleo Brent saltó de $94 a $128 "
+                 "(+36%). Gas natural europeo se duplicó. Trigo subió 40%. "
+                 "S&P 500 cayó ~5%. MOEX (Rusia) cerró 3 semanas. Euro cayó "
+                 "de 1.14 a 1.09 vs USD. Tasa 10Y subió de 1.93% a 2.00%."),
     CrisisPeriod("Crisis bancaria SVB 2023", "2023-03-08", "2023-03-15",
-                 "Colapso de Silicon Valley Bank en 48 horas, el mayor desde 2008. "
-                 "Contagio a Signature Bank y Credit Suisse. Temor de crisis bancaria "
-                 "sistémica, intervención de reguladores."),
+                 "SVB colapsó en 48 horas, el mayor banco en caer desde 2008. "
+                 "KBW Bank Index cayó ~25% en una semana. Signature Bank también "
+                 "cerrado. Credit Suisse forzado a fusionarse con UBS. Tasa 2Y "
+                 "cayó de 5.07% a 3.98% (-109 bps) en 3 días por flight to "
+                 "quality. VIX saltó de 19 a 26."),
     CrisisPeriod("Unwind Yen Carry 2024", "2024-07-31", "2024-08-05",
-                 "El Banco de Japón subió tasas inesperadamente, provocando el "
-                 "desarme del carry trade en yenes. El Nikkei cayó 12% en un día, "
-                 "contagio global de volatilidad."),
+                 "BOJ subió tasa de 0.10% a 0.25% inesperadamente. Yen se "
+                 "apreció de 153 a 142/USD en días. Nikkei 225 cayó 12.4% "
+                 "en un solo día (5 agosto). S&P 500 cayó ~6% en 3 días. "
+                 "VIX saltó de 16 a 65 intradía. Carry trade global "
+                 "desarmado: ~$20B en posiciones cerradas."),
 ]
 
 
