@@ -54,6 +54,7 @@ def init_state():
         "tickers": [], "views": [],
         "optimized": False, "result": None, "manual_weights": None,
         "returns": None, "bench_rets": None, "betas": None, "sectors": None,
+        "returns_full": None, "bench_full": None,
         "downloaded_period": None, "data_range": "",
     }
     for k, v in defaults.items():
@@ -351,12 +352,17 @@ with tab1:
             if not bench_dict:
                 st.error("No se pudieron descargar los benchmarks.")
             else:
-                # Alinear todo a fechas comunes
+                # Alinear a fechas comunes (necesario para optimización/covarianza)
                 common = log_ret.index
                 for bret in bench_dict.values():
                     common = common.intersection(bret.index)
                 st.session_state.returns   = log_ret.loc[common]
                 st.session_state.bench_rets = {k: v.loc[common] for k, v in bench_dict.items()}
+
+                # Data COMPLETA sin alinear (para stress testing: cada activo
+                # con toda su historia individual, sin recortar al mínimo común)
+                st.session_state.returns_full = log_ret
+                st.session_state.bench_full = bench_dict
 
                 # Betas contra el primer benchmark
                 primary = list(bench_dict.values())[0]
@@ -475,26 +481,40 @@ with tab3:
 
         st.divider()
         st.subheader("Ajuste manual de pesos")
-        st.caption("Mueve los pesos; se renormalizan a 100%.")
+        st.caption("Los sliders representan pesos relativos. La columna derecha "
+                   "muestra el peso final (siempre suma 100%).")
 
         cs, csum = st.columns([3, 2])
         with cs:
             nuevos = {}
             for a in res.weights.index:
                 es_fico = a == FICO_TICKER
-                nuevos[a] = st.slider(f"{a} · {'RF' if es_fico else 'RV'}",
-                                      0.0, 1.0, float(res.weights[a]), 0.01,
-                                      key=f"sl_{a}")
+                nuevos[a] = st.slider(
+                    f"{a} · {'RF' if es_fico else 'RV'}",
+                    0.0, 1.0, float(res.weights[a]), 0.01,
+                    key=f"sl_{a}",
+                    help="Peso relativo. Se normaliza junto a los demás para sumar 100%.",
+                )
             wn = pd.Series(nuevos)
             total = wn.sum()
             wnorm = wn / total if total > 0 else wn
             st.session_state.manual_weights = wnorm
 
+            # Feedback en vivo de la suma bruta
+            if total > 0:
+                st.caption(f"Suma bruta de sliders: **{total:.2f}** → "
+                           f"normalizada a 100%. Peso final = slider ÷ {total:.2f}")
+
         with csum:
+            st.markdown("**Peso final (normalizado):**")
+            for a in wnorm.index:
+                clase = "RF" if a == FICO_TICKER else "RV"
+                st.write(f"{a} · {clase}: **{wnorm[a]:.1%}**")
+            st.divider()
             eqw = float(wnorm[[a for a in wnorm.index if a != FICO_TICKER]].sum())
             fiw = float(wnorm.get(FICO_TICKER, 0.0))
-            st.metric("RV", f"{eqw:.1%}", delta=f"{eqw-eq_t:+.1%} vs target")
-            st.metric("RF", f"{fiw:.1%}", delta=f"{fiw-fi_t:+.1%} vs target")
+            st.metric("Total RV", f"{eqw:.1%}", delta=f"{eqw-eq_t:+.1%} vs target")
+            st.metric("Total RF", f"{fiw:.1%}", delta=f"{fiw-fi_t:+.1%} vs target")
             if abs(eqw - eq_t) > 0.05:
                 st.warning(f"Split desviado {abs(eqw-eq_t):.1%} del mandato.")
 
@@ -739,16 +759,26 @@ with tab4:
         st.divider()
         st.markdown("### Stress Testing histórico")
         st.caption("Impacto de crisis históricas en el portafolio actual.")
-        if st.session_state.data_range:
-            st.caption(f"📅 Datos disponibles: **{st.session_state.data_range}** "
-                       f"(período: {st.session_state.downloaded_period}). "
-                       f"Las crisis fuera de este rango aparecerán como 'sin datos'.")
+
+        # El stress test usa la data COMPLETA (cada activo con su historia total)
+        returns_stress = (st.session_state.returns_full
+                          if st.session_state.returns_full is not None
+                          else st.session_state.returns)
+        bench_stress = (st.session_state.bench_full
+                        if st.session_state.bench_full is not None
+                        else st.session_state.bench_rets)
+
+        if returns_stress is not None:
+            smin = returns_stress.index.min().strftime("%Y-%m-%d")
+            smax = returns_stress.index.max().strftime("%Y-%m-%d")
+            st.caption(f"📅 Historia para stress test: **{smin} → {smax}**. "
+                       f"Las crisis fuera de este rango aparecen como 'sin datos'.")
 
         if st.button("Correr stress test", use_container_width=True):
-            primary_bench = list(st.session_state.bench_rets.values())[0]
+            primary_bench = list(bench_stress.values())[0]
             with st.spinner("Aplicando escenarios…"):
                 stress = stress_test(
-                    weights=wnorm, returns=st.session_state.returns,
+                    weights=wnorm, returns=returns_stress,
                     crises=CRISIS_PERIODS, capital=capital_inicial,
                     forced_assets={FICO_TICKER: FICO},
                     periods_per_year=PPY, benchmark=primary_bench,
@@ -818,16 +848,36 @@ with tab4:
                 )
                 st.plotly_chart(fig3, use_container_width=True)
 
-                # Detalle por escenario
-                with st.expander("Detalle por escenario"):
-                    for s in available:
-                        st.markdown(f"**{s.name}** ({s.start} → {s.end})")
-                        st.caption(s.description)
-                        ar = s.asset_returns
-                        if not ar.empty:
-                            st.dataframe(
-                                ar.rename("Retorno").to_frame().style.format("{:.2%}"),
-                                use_container_width=True,
+                # Detalle de cada escenario SIEMPRE visible (no en expander)
+                st.divider()
+                st.markdown("#### ¿Qué pasó en cada escenario?")
+                for s in available:
+                    signo = "🔴" if s.port_return < 0 else "🟢"
+                    with st.container():
+                        cA, cB = st.columns([3, 1])
+                        with cA:
+                            st.markdown(f"{signo} **{s.name}** · {s.start} → {s.end}")
+                            st.caption(s.description)
+                        with cB:
+                            st.metric("Impacto portafolio", f"{s.port_return:+.2%}",
+                                      delta=f"${s.port_loss:,.0f}", delta_color="off")
+                        # Comparación con benchmark inline
+                        diff = s.port_return - s.benchmark_return
+                        mejor = "mejor" if diff > 0 else "peor"
+                        st.caption(
+                            f"→ El portafolio se comportó **{mejor}** que el benchmark "
+                            f"({s.port_return:+.2%} vs {s.benchmark_return:+.2%}, "
+                            f"diferencia {diff:+.2%}). Drawdown máximo dentro del período: "
+                            f"{s.max_drawdown:.2%}."
+                        )
+                        # Peor y mejor activo del escenario
+                        if not s.asset_returns.empty:
+                            ar = s.asset_returns.sort_values()
+                            peor_a = ar.index[0]
+                            mejor_a = ar.index[-1]
+                            st.caption(
+                                f"→ Activo más golpeado: **{peor_a}** ({ar.iloc[0]:+.2%}). "
+                                f"Activo más resiliente: **{mejor_a}** ({ar.iloc[-1]:+.2%})."
                             )
                         st.divider()
 
