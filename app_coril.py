@@ -129,13 +129,35 @@ def calc_betas(returns, bench_ret):
 
 @st.cache_data(show_spinner=False, ttl=600)
 def fetch_sectors(tickers):
-    """Obtiene sector de Yahoo Finance para cada ticker."""
+    """Obtiene sector/categoría de Yahoo Finance con clasificación robusta."""
     import yfinance as yf
     sectors = {}
     for tk in tickers:
         try:
-            info = yf.Ticker(tk).info
-            sectors[tk] = info.get("sector", "Sin clasificar")
+            info = yf.Ticker(tk).info or {}
+            quote_type = info.get("quoteType", "")
+            sector = info.get("sector", "")
+            category = info.get("category", "")         # ETFs tienen category
+            fund_family = info.get("fundFamily", "")
+
+            if sector and sector != "":
+                # Acciones: tienen sector directo
+                sectors[tk] = sector
+            elif quote_type == "ETF":
+                # ETFs: usar category o inferir del nombre
+                if category:
+                    sectors[tk] = f"ETF · {category}"
+                else:
+                    long_name = info.get("longName", tk)
+                    sectors[tk] = f"ETF · {long_name[:30]}"
+            elif quote_type == "MUTUALFUND":
+                sectors[tk] = f"Fondo · {category or 'Mixto'}"
+            elif quote_type == "INDEX":
+                sectors[tk] = "Índice"
+            else:
+                # Último recurso: intentar con industry
+                industry = info.get("industry", "")
+                sectors[tk] = industry if industry else "Sin clasificar"
         except Exception:
             sectors[tk] = "Sin clasificar"
     return pd.Series(sectors)
@@ -302,16 +324,87 @@ tab1, tab2, tab3, tab4 = st.tabs(
 # ── TAB 1 ────────────────────────────────────────────────────────────────────
 with tab1:
     st.subheader("Universo de renta variable")
-    c_in, c_add = st.columns([4, 1])
-    nt = c_in.text_input("Ticker", placeholder="AAPL, MSFT…",
-                         label_visibility="collapsed", key="in_tk")
-    if c_add.button("Añadir", use_container_width=True):
-        t = nt.strip().upper()
-        if t and t not in st.session_state.tickers:
-            st.session_state.tickers.append(t)
-            st.rerun()
 
+    # ── Buscador de tickers ──────────────────────────────────────────────
+    st.caption("Busca por nombre o ticker. Se valida antes de añadir.")
+
+    search_query = st.text_input("Buscar activo", placeholder="Ej: Visa, Apple, NVDA, QQQ…",
+                                 key="search_tk")
+
+    if search_query.strip():
+        @st.cache_data(show_spinner=False, ttl=300)
+        def search_yahoo(query):
+            """Busca activos en Yahoo Finance por nombre o ticker."""
+            import requests
+            try:
+                url = "https://query2.finance.yahoo.com/v1/finance/search"
+                params = {"q": query, "quotesCount": 8, "newsCount": 0}
+                headers = {"User-Agent": "Mozilla/5.0"}
+                r = requests.get(url, params=params, headers=headers, timeout=5)
+                data = r.json()
+                results = []
+                for q in data.get("quotes", []):
+                    symbol = q.get("symbol", "")
+                    name   = q.get("shortname") or q.get("longname") or ""
+                    qtype  = q.get("quoteType", "")
+                    exch   = q.get("exchange", "")
+                    if symbol:
+                        results.append({
+                            "Ticker": symbol, "Nombre": name,
+                            "Tipo": qtype, "Bolsa": exch,
+                        })
+                return results
+            except Exception:
+                return []
+
+        with st.spinner("Buscando…"):
+            results = search_yahoo(search_query.strip())
+
+        if results:
+            df_res = pd.DataFrame(results)
+            st.dataframe(df_res, use_container_width=True, hide_index=True)
+            # Selectbox para elegir cuál añadir
+            options = [f"{r['Ticker']} — {r['Nombre']}" for r in results]
+            selected = st.selectbox("Selecciona un activo para añadir",
+                                    options=["(elige)"] + options, key="sel_tk")
+            if selected != "(elige)":
+                ticker_to_add = selected.split(" — ")[0].strip()
+                if st.button(f"Añadir {ticker_to_add}", type="primary"):
+                    if ticker_to_add not in st.session_state.tickers:
+                        st.session_state.tickers.append(ticker_to_add)
+                        st.rerun()
+                    else:
+                        st.warning(f"{ticker_to_add} ya está en la lista.")
+        else:
+            st.warning("No se encontraron resultados. Verifica el nombre o ticker.")
+
+    # ── Agregar ticker directo (con validación) ──────────────────────────
+    with st.expander("Agregar ticker directo (sin buscar)"):
+        c_in, c_add = st.columns([4, 1])
+        nt = c_in.text_input("Ticker exacto", placeholder="AAPL",
+                             label_visibility="collapsed", key="in_tk")
+        if c_add.button("Añadir", use_container_width=True):
+            t = nt.strip().upper()
+            if t and t not in st.session_state.tickers:
+                # Validar que el ticker existe en Yahoo Finance
+                import yfinance as yf
+                try:
+                    check = yf.Ticker(t).history(period="5d")
+                    if check is not None and not check.empty:
+                        st.session_state.tickers.append(t)
+                        st.rerun()
+                    else:
+                        st.error(f"❌ **{t}** no tiene datos en Yahoo Finance. "
+                                 "Verifica que el ticker sea correcto.")
+                except Exception:
+                    st.error(f"❌ No se pudo validar **{t}**. Verifica el ticker.")
+            elif t in st.session_state.tickers:
+                st.warning(f"{t} ya está en la lista.")
+
+    # ── Lista de tickers añadidos ────────────────────────────────────────
+    st.divider()
     if st.session_state.tickers:
+        st.write(f"**Activos en el universo ({len(st.session_state.tickers)}):**")
         for i, t in enumerate(st.session_state.tickers):
             a, b = st.columns([6, 1])
             a.write(f"• {t}")
@@ -319,7 +412,7 @@ with tab1:
                 st.session_state.tickers.pop(i)
                 st.rerun()
     else:
-        st.info("Añade al menos un ticker de renta variable.")
+        st.info("Busca y añade activos de renta variable.")
 
     st.divider()
 
