@@ -31,7 +31,7 @@ RF_ANNUAL   = 0.02
 PPY         = 52
 
 FICO_TICKER = "FICCMP13"
-FICO = ForcedAsset(ret_annual=0.065, vol_annual=0.010, beta=0.30,
+FICO = ForcedAsset(ret_annual=0.0625, vol_annual=0.010, beta=0.30,
                    sector="Factoring", region="Perú", moneda="USD",
                    instrumento="Fondo de inversión")
 
