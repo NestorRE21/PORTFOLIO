@@ -322,10 +322,7 @@ with tab2:
                     dmax = st.session_state.returns.index.max().strftime("%Y-%m-%d")
                     st.session_state.data_range = f"{dmin} → {dmax}"
                     st.session_state.optimized = False; st.session_state.result = None
-                    st.success(f"✅ {len(common)} semanas × {len(ok)} activos · "
-                               f"Rango: {dmin} → {dmax}")
-                    st.dataframe(st.session_state.betas.rename("Beta").to_frame().T
-                                 .style.format("{:.3f}"), use_container_width=True)
+                    st.rerun()  # Refresca para que las pestañas se actualicen
 
         # ── Views ────────────────────────────────────────────────────────
         if has_data:
@@ -393,8 +390,7 @@ with tab3:
             st.session_state.result = res
             st.session_state.manual_weights = res.weights.copy()
             st.session_state.optimized = True
-            if res.feasible: st.success("✅ Portafolio optimizado.")
-            else: st.warning(f"⚠️ {res.feasibility_report}")
+            st.rerun()  # Refresca para mostrar resultados inmediatamente
 
         if has_opt:
             res = st.session_state.result
@@ -591,14 +587,14 @@ with tab4:
         st.subheader("🔥 Pruebas de estrés históricas")
         st.caption("¿Qué le pasaría a tu portafolio actual si se repitiera una crisis del pasado?")
 
-        ret_stress = st.session_state.returns_full or st.session_state.returns
+        ret_stress = st.session_state.returns_full if st.session_state.returns_full is not None else st.session_state.returns
         if ret_stress is not None:
             smin = ret_stress.index.min().strftime("%Y-%m-%d")
             smax = ret_stress.index.max().strftime("%Y-%m-%d")
             st.caption(f"📅 Datos disponibles: **{smin} → {smax}**")
 
         if st.button("▶️ Correr pruebas de estrés", use_container_width=True):
-            bench_st = st.session_state.bench_full or st.session_state.bench_rets or {}
+            bench_st = st.session_state.bench_full if st.session_state.bench_full is not None else (st.session_state.bench_rets if isinstance(st.session_state.bench_rets, dict) else {})
             primary = list(bench_st.values())[0] if bench_st else None
             with st.spinner("Analizando escenarios…"):
                 stress = stress_test(wnorm, ret_stress, CRISIS_PERIODS, capital_inicial,
