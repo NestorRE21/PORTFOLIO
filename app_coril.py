@@ -171,7 +171,6 @@ with st.sidebar:
 
 # ═══════════════════════════ HEADER ═══════════════════════════════════════════
 st.title("Optimizador de portafolios")
-# Progress (se recalcula en cada interacción)
 _ht = len(st.session_state.tickers) > 0
 _hd = st.session_state.returns is not None
 _ho = st.session_state.optimized and st.session_state.result is not None
@@ -179,8 +178,9 @@ p1 = "✅" if _ht else "1️⃣"; p2 = "✅" if _hd else ("2️⃣" if _ht else 
 p3 = "✅" if _ho else ("3️⃣" if _hd else "⬜"); p4 = "4️⃣" if _ho else "⬜"
 st.caption(f"{p1} Activos → {p2} Datos → {p3} Portafolio → {p4} Proyecciones")
 
+# IMPORTANTE: labels FIJOS para que Streamlit no resetee el tab activo
 tab1, tab2, tab3, tab4 = st.tabs([
-    f"{p1} Activos", f"{p2} Datos y views", f"{p3} Portafolio", f"{p4} Proyecciones"])
+    "1 · Activos", "2 · Datos y views", "3 · Portafolio", "4 · Proyecciones"])
 
 # ═══════════════════════════ TAB 1: ACTIVOS ═══════════════════════════════════
 with tab1:
@@ -427,12 +427,40 @@ with tab4:
             fig.update_yaxes(tickprefix="$",tickformat=",.0f")
             fig.update_layout(height=400,margin=dict(l=0,r=0,t=10,b=0),legend=dict(orientation="h",y=-0.1))
             st.plotly_chart(fig, use_container_width=True)
-            with st.expander("📊 Tabla de escenarios"):
-                labels = ["Pesimista","Conservador","Probable bajo","Central","Probable alto","Optimista","Mejor caso"]
-                pct_df = pd.DataFrame({"Escenario":labels,
-                    "Capital final":[f"${mc.percentiles[p][-1]:,.0f}" for p in [5,10,25,50,75,90,95]],
-                    "Retorno":[f"{mc.percentiles[p][-1]/mc.capital-1:.1%}" for p in [5,10,25,50,75,90,95]]})
+            with st.expander("📊 Tabla de escenarios — detalle"):
+                pcts = [5, 10, 25, 50, 75, 90, 95]
+                cap_vals = [mc.percentiles[p][-1] for p in pcts]
+                ret_vals = [mc.percentiles[p][-1] / mc.capital - 1 for p in pcts]
+
+                pct_df = pd.DataFrame({
+                    "Escenario": [
+                        "Pesimista (P5)",
+                        "Conservador (P10)",
+                        "Probable bajo (P25)",
+                        "Escenario central (P50)",
+                        "Probable alto (P75)",
+                        "Optimista (P90)",
+                        "Mejor caso (P95)",
+                    ],
+                    "Capital final": [f"${v:,.0f}" for v in cap_vals],
+                    "Retorno total": [f"{v:+.1%}" for v in ret_vals],
+                    "Ganancia / Pérdida": [f"${v - mc.capital:+,.0f}" for v in cap_vals],
+                    "Interpretación": [
+                        f"Solo el 5% de los futuros termina peor. Pérdida máxima probable.",
+                        f"90% de probabilidad de superar este resultado.",
+                        f"75% de probabilidad de superar este resultado.",
+                        f"Resultado más probable. La mitad termina arriba, la mitad abajo.",
+                        f"Solo el 25% de los futuros supera este resultado.",
+                        f"Solo el 10% de los futuros es mejor que esto.",
+                        f"Casi el mejor caso posible (top 5%).",
+                    ],
+                })
                 st.dataframe(pct_df, use_container_width=True, hide_index=True)
+                st.caption(
+                    "💡 **Cómo leer esta tabla:** El percentil (P) indica qué porcentaje de "
+                    "los escenarios simulados termina **por debajo** de ese valor. P50 es la "
+                    "mediana (escenario central). P5 es el casi-peor-caso. P95 es el casi-mejor-caso."
+                )
 
         # ── STRESS ────────────────────────────────────────────────────────
         st.divider()
