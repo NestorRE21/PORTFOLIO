@@ -17,7 +17,7 @@ Flujo de uso:
     result = run_profile(
         returns        = df_log_returns,      # DataFrame (fechas × activos) log-ret
         equity_assets  = ["AAPL", "MSFT", ...],
-        forced_assets  = {"FICCMP13": ForcedAsset(ret_annual=0.065, ...)},
+        forced_assets  = {"FICCMP13": ForcedAsset(ret_annual=0.0625, ...)},
         profile        = RiskProfile.for_split(0.50, 0.50),
         views          = [ ... ],
         config         = BLConfig(),
