@@ -312,20 +312,39 @@ with tab3:
             m4.metric("Beta", f"{res.beta:.2f}", help="Sensibilidad al mercado.")
 
             st.divider()
-            st.subheader("Ajustar pesos")
-            st.caption("Mueve los sliders. La columna derecha muestra el peso real (suma 100%).")
+            st.subheader("Ajustar pesos (%)")
+            st.caption("Escribe el porcentaje de cada activo. Si la suma no es 100%, "
+                       "se normaliza automáticamente.")
+
             cs, csum = st.columns([3, 2])
             with cs:
                 nw = {}
                 for a in res.weights.index:
                     ef = a == FICO_TICKER
-                    nw[a] = st.slider(f"{a} {'🟢RF' if ef else '🔵RV'}", 0.0, 1.0,
-                                      float(res.weights[a]), 0.01, key=f"s_{a}")
-                wn = pd.Series(nw); tot = wn.sum()
-                wnorm = wn / tot if tot > 0 else wn
+                    icono = "🟢 RF" if ef else "🔵 RV"
+                    nw[a] = st.number_input(
+                        f"{a} · {icono}",
+                        min_value=0.0, max_value=100.0,
+                        value=round(float(res.weights[a]) * 100, 1),
+                        step=0.5, format="%.1f",
+                        key=f"s_{a}",
+                        help=f"Peso en % para {a}",
+                    )
+                # Convertir de % a decimal
+                wn_pct = pd.Series(nw)
+                tot_pct = wn_pct.sum()
+                wn = wn_pct / 100.0
+                wnorm = wn_pct / tot_pct if tot_pct > 0 else wn
                 st.session_state.manual_weights = wnorm
+
+                # Feedback de la suma
+                if abs(tot_pct - 100) < 0.1:
+                    st.success(f"✅ Suma: {tot_pct:.1f}%")
+                else:
+                    st.warning(f"⚠️ Suma: {tot_pct:.1f}% (se normaliza a 100%)")
+
             with csum:
-                st.markdown("**Peso final:**")
+                st.markdown("**Peso final (normalizado):**")
                 for a in wnorm.index:
                     ic = "🟢" if a == FICO_TICKER else "🔵"
                     st.write(f"{ic} {a}: **{wnorm[a]:.1%}**")
