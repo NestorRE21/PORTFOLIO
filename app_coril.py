@@ -188,7 +188,7 @@ with tab1:
     if not st.session_state.tickers:
         st.info("👋 **¿Primera vez?** Busca activos abajo o carga un ejemplo.")
         if st.button("🚀 Cargar ejemplo (6 activos US)", type="primary"):
-            st.session_state.tickers = list(EJEMPLO_TK); st.rerun()
+            st.session_state.tickers = list(EJEMPLO_TK)
 
     q = st.text_input("🔍 Buscar por nombre o ticker", placeholder="Visa, Apple, NVDA…")
     if q.strip():
@@ -201,7 +201,7 @@ with tab1:
                 tk = sel.split(" — ")[0].strip()
                 if st.button(f"➕ Añadir {tk}", type="primary"):
                     if tk not in st.session_state.tickers:
-                        st.session_state.tickers.append(tk); st.rerun()
+                        st.session_state.tickers.append(tk)
                     else: st.toast(f"{tk} ya está en la lista")
         else: st.warning("Sin resultados.")
 
@@ -212,7 +212,7 @@ with tab1:
         for i, t in enumerate(st.session_state.tickers):
             with cols[i % len(cols)]:
                 if st.button(f"❌ {t}", key=f"rm{i}", use_container_width=True):
-                    st.session_state.tickers.pop(i); st.rerun()
+                    st.session_state.tickers.pop(i)
 
 # ═══════════════════════════ TAB 2: DATOS + VIEWS ═════════════════════════════
 with tab2:
@@ -267,7 +267,7 @@ with tab2:
                 vq = c2.number_input("Retorno anual", value=0.10, step=0.01, format="%.2f", key="vq")
                 vc = c3.slider("Confianza", 0.1, 1.0, 0.5, 0.1, key="vc")
                 if st.button("Añadir"):
-                    st.session_state.views.append({"type":"absolute","asset":va,"q":float(vq),"confidence":float(vc)}); st.rerun()
+                    st.session_state.views.append({"type":"absolute","asset":va,"q":float(vq),"confidence":float(vc)})
             else:
                 c1,c2,c3,c4 = st.columns(4)
                 vl = c1.selectbox("Ganador", st.session_state.tickers, key="vl")
@@ -276,13 +276,13 @@ with tab2:
                 vc = c4.slider("Confianza", 0.1, 1.0, 0.5, 0.1, key="vcr")
                 if st.button("Añadir"):
                     if vl==vs: st.warning("Deben ser distintos.")
-                    else: st.session_state.views.append({"type":"relative","long":vl,"short":vs,"q":float(vq),"confidence":float(vc)}); st.rerun()
+                    else: st.session_state.views.append({"type":"relative","long":vl,"short":vs,"q":float(vq),"confidence":float(vc)})
             if st.session_state.views:
                 for i, v in enumerate(st.session_state.views):
                     a, b = st.columns([6, 1])
                     txt = f"📌 **{v['asset']}** → {v['q']:.0%}" if v["type"]=="absolute" else f"📌 **{v['long']}** > **{v['short']}** por {v['q']:.0%}"
                     a.write(txt + f" (confianza {v['confidence']:.0%})")
-                    if b.button("✕", key=f"rv{i}"): st.session_state.views.pop(i); st.rerun()
+                    if b.button("✕", key=f"rv{i}"): st.session_state.views.pop(i)
 
 # ═══════════════════════════ TAB 3: PORTAFOLIO ════════════════════════════════
 with tab3:
