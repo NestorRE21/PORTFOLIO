@@ -317,16 +317,9 @@ with tab3:
         _has_opt = st.session_state.optimized and st.session_state.result is not None
         if _has_opt:
             res = st.session_state.result
-            m1,m2,m3,m4 = st.columns(4)
-            m1.metric("Retorno esperado", f"{res.exp_return:.2%}", help="Proyección anual del modelo.")
-            m2.metric("Riesgo", f"{res.volatility:.2%}", help="Volatilidad anualizada.")
-            m3.metric("Sharpe", f"{res.sharpe:.2f}", help="Retorno por unidad de riesgo.")
-            m4.metric("Beta", f"{res.beta:.2f}", help="Sensibilidad al mercado.")
 
-            st.divider()
             st.subheader("Ajustar pesos (%)")
-            st.caption("Escribe el porcentaje de cada activo. Si la suma no es 100%, "
-                       "se normaliza automáticamente.")
+            st.caption("Cambia los porcentajes. Las métricas se recalculan automáticamente.")
 
             cs, csum = st.columns([3, 2])
             with cs:
@@ -342,21 +335,18 @@ with tab3:
                         key=f"s_{a}",
                         help=f"Peso en % para {a}",
                     )
-                # Convertir de % a decimal
                 wn_pct = pd.Series(nw)
                 tot_pct = wn_pct.sum()
-                wn = wn_pct / 100.0
-                wnorm = wn_pct / tot_pct if tot_pct > 0 else wn
+                wnorm = wn_pct / tot_pct if tot_pct > 0 else wn_pct / 100.0
                 st.session_state.manual_weights = wnorm
 
-                # Feedback de la suma
                 if abs(tot_pct - 100) < 0.1:
                     st.success(f"✅ Suma: {tot_pct:.1f}%")
                 else:
-                    st.warning(f"⚠️ Suma: {tot_pct:.1f}% (se normaliza a 100%)")
+                    st.warning(f"⚠️ Suma: {tot_pct:.1f}% → normalizado a 100%")
 
             with csum:
-                st.markdown("**Peso final (normalizado):**")
+                st.markdown("**Peso final:**")
                 for a in wnorm.index:
                     ic = "🟢" if a == FICO_TICKER else "🔵"
                     st.write(f"{ic} {a}: **{wnorm[a]:.1%}**")
@@ -365,6 +355,29 @@ with tab3:
                 fiw = float(wnorm.get(FICO_TICKER, 0))
                 st.metric("RV", f"{eqw:.1%}", delta=f"{eqw-eq_t:+.1%} vs obj")
                 st.metric("RF", f"{fiw:.1%}", delta=f"{fiw-fi_t:+.1%} vs obj")
+
+            # ── Métricas calculadas desde los pesos ACTUALES (no de res) ──
+            st.divider()
+            w_np = wnorm.reindex(res.bl_returns.index).fillna(0).to_numpy()
+            mu_np = res.bl_returns.to_numpy()
+            S_np = res.cov_matrix.to_numpy()
+            betas_np = st.session_state.betas.reindex(res.bl_returns.index).fillna(1.0).to_numpy()
+
+            port_ret = float(w_np @ mu_np)
+            port_vol = float(np.sqrt(max(w_np @ S_np @ w_np, 1e-10)))
+            port_sharpe = (port_ret - RF_ANNUAL) / port_vol if port_vol > 1e-10 else 0.0
+            port_beta = float(w_np @ betas_np)
+
+            st.subheader("Métricas del portafolio")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Retorno esperado", f"{port_ret:.2%}",
+                      help="Calculado con los pesos actuales × retornos BL.")
+            m2.metric("Riesgo", f"{port_vol:.2%}",
+                      help="Volatilidad anualizada con los pesos actuales.")
+            m3.metric("Sharpe", f"{port_sharpe:.2f}",
+                      help="(Retorno − tasa libre) ÷ volatilidad.")
+            m4.metric("Beta", f"{port_beta:.2f}",
+                      help="Promedio ponderado de los betas individuales.")
 
             st.divider()
             g1, g2, g3 = st.columns(3)
