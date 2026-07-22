@@ -35,7 +35,7 @@ COL_RV, COL_RF, COL_OPT = "#2E5E8C", "#2CA02C", "#D6604D"
 BMK_COLORS = ["#888888", "#E377C2", "#FF7F0E", "#9467BD", "#17BECF"]
 
 # ═══════════════════════════ STATE ════════════════════════════════════════════
-for k, v in {"tickers":[],"views":[],"optimized":False,"result":None,
+for k, v in {"tickers":[],"benchmarks":["^GSPC","SPY"],"views":[],"optimized":False,"result":None,
              "manual_weights":None,"returns":None,"bench_rets":None,
              "betas":None,"sectors":None,"returns_full":None,
              "bench_full":None,"downloaded_period":None,"data_range":""}.items():
@@ -251,7 +251,15 @@ with tab2:
                     st.session_state.downloaded_period = period
                     d1 = lr.index.min().strftime("%Y-%m-%d"); d2 = lr.index.max().strftime("%Y-%m-%d")
                     st.session_state.data_range = f"{d1} → {d2}"
-                    st.session_state.optimized = False; st.session_state.result = None
+                    # Limpiar estado de optimización y widgets previos
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("s_"):
+                            del st.session_state[k]
+                    st.session_state.optimized = False
+                    st.session_state.result = None
+                    st.session_state.manual_weights = None
+                    if "mc" in st.session_state: del st.session_state["mc"]
+                    if "stress" in st.session_state: del st.session_state["stress"]
                     st.success(f"✅ {len(common)} semanas · {d1} → {d2}")
 
         # Views (solo si hay datos)
@@ -296,6 +304,10 @@ with tab3:
             pb = list(st.session_state.bench_rets.values())[0]
             with st.spinner("Calculando…"):
                 r = do_optimize(st.session_state.tickers, st.session_state.views, eq_t, fi_t, pb)
+            # Limpiar keys de widgets de pesos anteriores para que tomen los nuevos
+            for k in list(st.session_state.keys()):
+                if k.startswith("s_"):
+                    del st.session_state[k]
             st.session_state.result = r
             st.session_state.manual_weights = r.weights.copy()
             st.session_state.optimized = True
