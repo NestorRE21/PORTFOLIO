@@ -98,8 +98,10 @@ def wdd(w,rets,bd,cap):
     pr=pr.fillna(0); common=pr.index
     for v in bd.values(): common=common.intersection(v.index)
     pr=pr.loc[common]; wl=np.exp(pr.cumsum())*cap; dd=wl/wl.cummax()-1
-    bw={n:np.exp(v.loc[common].fillna(0).cumsum())*cap for n,v in bd.items()}
-    return pr,wl,dd,bw
+    bw,bdd={},{}
+    for n,v in bd.items():
+        br=v.loc[common].fillna(0); bw[n]=np.exp(br.cumsum())*cap; bdd[n]=bw[n]/bw[n].cummax()-1
+    return pr,wl,dd,bw,bdd
 
 def run_dl(period):
     tks=st.session_state.tickers; bks=st.session_state.benchmarks
@@ -252,25 +254,56 @@ with tab3:
             m1,m2,m3,m4=st.columns(4)
             m1.metric("Retorno",f"{p_r:.2%}"); m2.metric("Riesgo",f"{p_v:.2%}"); m3.metric("Sharpe",f"{p_sh:.2f}"); m4.metric("Beta",f"{p_bt:.2f}")
 
-            # Gráficos compactos: composición + evolución en una fila
-            g1,g2=st.columns([1,2])
+            # Gráficos: composición por activo + por sector
+            import plotly.express as px
+            g1,g2=st.columns(2)
             with g1:
+                st.caption("Por activo")
                 ws=wnorm[wnorm>1e-4]
+                colors=px.colors.qualitative.Set2[:len(ws)]
                 fig=go.Figure(go.Pie(labels=ws.index.tolist(),values=ws.values.tolist(),
-                    marker_colors=[C_RF if a==FICO_TK else C_RV for a in ws.index],hole=.4))
-                fig.update_layout(height=280,margin=dict(l=0,r=0,t=5,b=0),showlegend=True,
-                                 legend=dict(font=dict(size=10)))
+                    marker_colors=colors,hole=.4,textinfo="label+percent"))
+                fig.update_layout(height=280,margin=dict(l=0,r=0,t=5,b=0),showlegend=False)
                 st.plotly_chart(fig,use_container_width=True)
             with g2:
-                pr,wl,dd,bw=wdd(wnorm,st.session_state.returns,st.session_state.bench_rets,capital)
-                fig=make_subplots(rows=2,cols=1,shared_xaxes=True,row_heights=[.75,.25],vertical_spacing=.03)
-                fig.add_trace(go.Scatter(x=wl.index,y=wl.values,name="Portafolio",line=dict(color=C_RV,width=2)),row=1,col=1)
-                for i,(n,v) in enumerate(bw.items()):
-                    fig.add_trace(go.Scatter(x=v.index,y=v.values,name=n,line=dict(color=BC[i%len(BC)],dash="dash")),row=1,col=1)
-                fig.add_trace(go.Scatter(x=dd.index,y=dd.values,name="DD",fill="tozeroy",line=dict(color=C_OPT,width=1)),row=2,col=1)
-                fig.update_yaxes(tickprefix="$",tickformat=",.0f",row=1,col=1); fig.update_yaxes(tickformat=".0%",row=2,col=1)
-                fig.update_layout(height=280,margin=dict(l=0,r=0,t=5,b=0),legend=dict(orientation="h",y=1.1,font=dict(size=10)))
-                st.plotly_chart(fig,use_container_width=True)
+                st.caption("Por sector")
+                sec=st.session_state.sectors
+                if sec is not None and not sec.empty:
+                    sw={}
+                    for a in wnorm.index:
+                        if wnorm[a]>1e-4: s=sec.get(a,"–"); sw[s]=sw.get(s,0)+wnorm[a]
+                    sec_colors=px.colors.qualitative.Pastel[:len(sw)]
+                    fig=go.Figure(go.Pie(labels=list(sw.keys()),values=list(sw.values()),
+                        marker_colors=sec_colors,hole=.4,textinfo="label+percent"))
+                    fig.update_layout(height=280,margin=dict(l=0,r=0,t=5,b=0),showlegend=False)
+                    st.plotly_chart(fig,use_container_width=True)
+
+            # Evolución histórica — grande, con DD de portafolio Y benchmark
+            pr,wl,dd,bw,bdd=wdd(wnorm,st.session_state.returns,st.session_state.bench_rets,capital)
+            fig=make_subplots(rows=2,cols=1,shared_xaxes=True,row_heights=[.65,.35],vertical_spacing=.04,
+                             subplot_titles=[f"Evolución de capital (${capital:,.0f})","Drawdown"])
+            fig.add_trace(go.Scatter(x=wl.index,y=wl.values,name="Portafolio",
+                                    line=dict(color=C_RV,width=2.5)),row=1,col=1)
+            for i,(n,v) in enumerate(bw.items()):
+                fig.add_trace(go.Scatter(x=v.index,y=v.values,name=n,
+                    line=dict(color=BC[i%len(BC)],dash="dash",width=1.5)),row=1,col=1)
+            # Drawdown portafolio
+            fig.add_trace(go.Scatter(x=dd.index,y=dd.values,name="DD Portafolio",
+                                    fill="tozeroy",fillcolor="rgba(214,96,77,0.3)",
+                                    line=dict(color=C_OPT,width=1.5)),row=2,col=1)
+            # Drawdown benchmarks
+            for i,(n,ddb) in enumerate(bdd.items()):
+                fig.add_trace(go.Scatter(x=ddb.index,y=ddb.values,name=f"DD {n}",
+                    line=dict(color=BC[i%len(BC)],dash="dot",width=1)),row=2,col=1)
+            # Línea límite DD del perfil
+            _prof=RiskProfile.for_split(eq_t,fi_t)
+            fig.add_hline(y=-_prof.max_drawdown,line_dash="dash",line_color="black",
+                         row=2,col=1,annotation_text=f"Límite {_prof.max_drawdown:.0%}")
+            fig.update_yaxes(tickprefix="$",tickformat=",.0f",row=1,col=1)
+            fig.update_yaxes(tickformat=".0%",row=2,col=1)
+            fig.update_layout(height=520,margin=dict(l=0,r=0,t=25,b=0),
+                             legend=dict(orientation="h",y=-0.08,font=dict(size=10)))
+            st.plotly_chart(fig,use_container_width=True)
 
             # Métricas históricas inline
             ann_r=np.exp(pr.mean()*PPY)-1; ann_v=pr.std(ddof=1)*np.sqrt(PPY)
