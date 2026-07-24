@@ -87,11 +87,17 @@ def search_yahoo(q):
 
 def do_optimize(tickers,views_cfg,eq_t,fi_t,pb):
     betas=st.session_state.betas.copy(); betas[FICO_TK]=FICO.beta
+    ok=[t for t in tickers if t in st.session_state.returns.columns]
+    all_assets = set(ok) | {FICO_TK}
+    # Filtrar views que referencien activos ya eliminados
     views=[]
     for v in views_cfg:
-        if v["type"]=="absolute": views.append(View(kind="absolute",asset=v["asset"],q=v["q"],confidence=v["confidence"]))
-        else: views.append(View(kind="relative",long=v["long"],short=v["short"],q=v["q"],confidence=v["confidence"]))
-    ok=[t for t in tickers if t in st.session_state.returns.columns]
+        if v["type"]=="absolute":
+            if v["asset"] in all_assets:
+                views.append(View(kind="absolute",asset=v["asset"],q=v["q"],confidence=v["confidence"]))
+        else:
+            if v["long"] in all_assets and v["short"] in all_assets:
+                views.append(View(kind="relative",long=v["long"],short=v["short"],q=v["q"],confidence=v["confidence"]))
     return run_profile(returns=st.session_state.returns,equity_assets=ok,forced_assets={FICO_TK:FICO},
                        profile=RiskProfile.for_split(eq_t,fi_t),views=views,
                        config=BLConfig(rf_annual=RF,periods_per_year=PPY,tau=0.05,max_weight_equity=0.25,gamma_beta=5.0),
@@ -224,6 +230,7 @@ with tab1:
         st.info("👋 **¿Primera vez?** Busca arriba o carga un ejemplo.")
         if st.button("🚀 Cargar ejemplo (6 activos US)", type="primary"):
             st.session_state.tickers = list(EJEMPLO)
+            st.session_state.views = []  # limpiar views de activos anteriores
             st.toast("Ejemplo cargado ✓")
 
     # ── Listas actuales ──────────────────────────────────────────────────
@@ -235,7 +242,12 @@ with tab1:
             for i,t in enumerate(st.session_state.tickers):
                 c1,c2=st.columns([5,1])
                 c1.write(t)
-                if c2.button("✕",key=f"ra{i}"): st.session_state.tickers.pop(i); st.toast(f"{t} eliminado")
+                if c2.button("✕",key=f"ra{i}"):
+                    removed = st.session_state.tickers.pop(i)
+                    # Limpiar views que referencien el activo eliminado
+                    st.session_state.views = [v for v in st.session_state.views
+                        if v.get("asset") != removed and v.get("long") != removed and v.get("short") != removed]
+                    st.toast(f"{removed} eliminado")
         else:
             st.caption("Ninguno aún.")
 
@@ -411,53 +423,116 @@ with tab4:
         res=st.session_state.result
         wnorm=st.session_state.manual_weights if st.session_state.manual_weights is not None else res.weights
 
-        st.subheader("🎲 Monte Carlo")
-        st.caption("Simula miles de futuros posibles.")
+        st.subheader("🎲 ¿Cuánto podría valer tu portafolio en el futuro?")
+        st.write("Simulamos miles de escenarios posibles para tu portafolio "
+                 "y te mostramos el rango de resultados más probables.")
+
         c1,c2,c3=st.columns(3)
-        mh=c1.selectbox("Horizonte",[1,2,3,5,10],index=2,format_func=lambda x:f"{x} año{'s' if x>1 else ''}")
-        mn=c2.selectbox("Simulaciones",[1000,5000,10000],index=1)
-        mt=c3.number_input("Objetivo",value=int(capital*1.2),step=10_000,format="%d")
-        if st.button("▶️ Simular",type="primary",use_container_width=True):
-            with st.spinner(f"Simulando {mn:,} futuros…"):
+        mh=c1.selectbox("¿En cuántos años?", [1,2,3,5,10], index=2,
+                        format_func=lambda x: f"{x} año{'s' if x>1 else ''}")
+        mn=c2.selectbox("Precisión", [1000,5000,10000], index=1,
+                        format_func=lambda x: f"{x:,} escenarios")
+        mt=c3.number_input("¿Cuál es tu meta? (USD)", value=int(capital*1.2),
+                           step=10_000, format="%d")
+
+        if st.button("▶️ Proyectar", type="primary", use_container_width=True):
+            with st.spinner(f"Calculando {mn:,} escenarios a {mh} años…"):
                 mc=monte_carlo(wnorm,res.bl_returns,res.cov_matrix,capital,mh,PPY,mn,mt)
             st.session_state["mc"]=mc
+
         if "mc" in st.session_state and st.session_state["mc"] is not None:
             mc=st.session_state["mc"]
-            m1,m2,m3,m4,m5=st.columns(5)
-            m1.metric("Proyectado",f"${mc.median_path[-1]:,.0f}",help="Mediana.")
-            m2.metric("P(pérdida)",f"{mc.prob_loss:.1%}")
-            m3.metric(f"P(≥${mc.target:,.0f})",f"{mc.prob_target:.1%}")
-            m4.metric("VaR term.",f"${mc.var_terminal:,.0f}"); m5.metric("CVaR term.",f"${mc.cvar_terminal:,.0f}")
-            st.info(f"💡 Escenario central: **${mc.median_path[-1]:,.0f}** en {mc.horizon_years:.0f} año(s). "
-                    f"Prob. pérdida: **{mc.prob_loss:.1%}**. Prob. objetivo: **{mc.prob_target:.1%}**.")
+
+            # ── 3 números grandes y claros ────────────────────────────────
+            st.divider()
+            gain = mc.median_path[-1] - mc.capital
+            gain_pct = gain / mc.capital
+            c1,c2,c3 = st.columns(3)
+            c1.metric("💰 Capital proyectado",
+                      f"${mc.median_path[-1]:,.0f}",
+                      delta=f"+${gain:,.0f} ({gain_pct:+.1%})",
+                      help="Escenario más probable (mediana). La mitad de los futuros "
+                           "termina por encima, la mitad por debajo.")
+            c2.metric("🛡️ Probabilidad de NO perder",
+                      f"{100 - mc.prob_loss*100:.0f}%",
+                      help="Porcentaje de escenarios donde terminas con más "
+                           "dinero del que invertiste.")
+            c3.metric("🎯 Probabilidad de alcanzar tu meta",
+                      f"{mc.prob_target:.0%}",
+                      delta=f"meta: ${mc.target:,.0f}",
+                      delta_color="off",
+                      help="Porcentaje de escenarios donde el capital final "
+                           "iguala o supera tu objetivo.")
+
+            # ── Resumen en lenguaje claro ─────────────────────────────────
+            p5 = mc.percentiles[5][-1]
+            p95 = mc.percentiles[95][-1]
+            st.success(
+                f"📊 **Resumen:** Si inviertes **${mc.capital:,.0f}** durante "
+                f"**{mc.horizon_years:.0f} año(s)**, lo más probable es que "
+                f"termines con **${mc.median_path[-1]:,.0f}**. "
+                f"En el 90% de los escenarios, tu capital queda entre "
+                f"**${p5:,.0f}** y **${p95:,.0f}**."
+            )
+
+            # ── Gráfico con nombres claros ────────────────────────────────
             fig=go.Figure(); x=mc.dates
-            for lo,hi,cl in [(5,95,"rgba(46,94,140,0.08)"),(10,90,"rgba(46,94,140,0.12)"),(25,75,"rgba(46,94,140,0.18)")]:
-                fig.add_trace(go.Scatter(x=list(x)+list(x[::-1]),y=list(mc.percentiles[hi])+list(mc.percentiles[lo][::-1]),
-                    fill="toself",fillcolor=cl,line=dict(width=0),name=f"P{lo}–P{hi}"))
-            fig.add_trace(go.Scatter(x=x,y=mc.median_path,name="Mediana",line=dict(color=C_RV,width=2.5)))
-            fig.add_hline(y=mc.capital,line_dash="dot",line_color="gray",annotation_text=f"Inversión ${mc.capital:,.0f}")
-            if mc.target!=mc.capital: fig.add_hline(y=mc.target,line_dash="dot",line_color=C_RF,annotation_text=f"Objetivo ${mc.target:,.0f}")
+            for lo,hi,cl,nm in [
+                (5,95,"rgba(46,94,140,0.08)","Rango amplio (90% de escenarios)"),
+                (10,90,"rgba(46,94,140,0.12)","Rango probable (80%)"),
+                (25,75,"rgba(46,94,140,0.18)","Rango más probable (50%)")]:
+                fig.add_trace(go.Scatter(
+                    x=list(x)+list(x[::-1]),
+                    y=list(mc.percentiles[hi])+list(mc.percentiles[lo][::-1]),
+                    fill="toself",fillcolor=cl,line=dict(width=0),name=nm))
+            fig.add_trace(go.Scatter(x=x,y=mc.median_path,
+                                    name="Escenario más probable",
+                                    line=dict(color=C_RV,width=2.5)))
+            fig.add_hline(y=mc.capital,line_dash="dot",line_color="gray",
+                         annotation_text=f"Tu inversión: ${mc.capital:,.0f}")
+            if mc.target!=mc.capital:
+                fig.add_hline(y=mc.target,line_dash="dot",line_color=C_RF,
+                             annotation_text=f"Tu meta: ${mc.target:,.0f}")
             fig.update_yaxes(tickprefix="$",tickformat=",.0f")
-            fig.update_layout(height=400,margin=dict(l=0,r=0,t=10,b=0),legend=dict(orientation="h",y=-0.1))
+            fig.update_layout(
+                height=420,margin=dict(l=0,r=0,t=10,b=0),
+                legend=dict(orientation="h",y=-0.12),
+                xaxis_title=None, yaxis_title="Valor del portafolio")
             st.plotly_chart(fig,use_container_width=True)
-            with st.expander("📊 Detalle por escenario"):
+            st.caption("↑ La zona oscura es donde es más probable que termine tu portafolio. "
+                       "La línea azul es el escenario central.")
+
+            # ── 3 escenarios clave (no 7) ─────────────────────────────────
+            st.divider()
+            st.write("**Tres escenarios clave:**")
+            sc1,sc2,sc3 = st.columns(3)
+            with sc1:
+                v5 = mc.percentiles[5][-1]
+                st.metric("😟 Si va mal (P5)", f"${v5:,.0f}",
+                          delta=f"{v5/mc.capital-1:+.1%}")
+                st.caption("Solo el 5% de los futuros es peor que esto.")
+            with sc2:
+                v50 = mc.percentiles[50][-1]
+                st.metric("📊 Lo más probable (P50)", f"${v50:,.0f}",
+                          delta=f"{v50/mc.capital-1:+.1%}")
+                st.caption("La mitad termina arriba, la mitad abajo.")
+            with sc3:
+                v95 = mc.percentiles[95][-1]
+                st.metric("🚀 Si va muy bien (P95)", f"${v95:,.0f}",
+                          delta=f"{v95/mc.capital-1:+.1%}")
+                st.caption("Solo el 5% de los futuros es mejor que esto.")
+
+            # ── Tabla completa en expander ─────────────────────────────────
+            with st.expander("📋 Ver todos los escenarios"):
                 pcts=[5,10,25,50,75,90,95]; cv=[mc.percentiles[p][-1] for p in pcts]
                 pct_df=pd.DataFrame({
-                    "Escenario":[f"Pesimista (P5)",f"Conservador (P10)",f"Probable bajo (P25)",
-                                 f"Central (P50)",f"Probable alto (P75)",f"Optimista (P90)",f"Mejor caso (P95)"],
+                    "Escenario":["Pesimista (P5)","Conservador (P10)","Probable bajo (P25)",
+                                 "Central (P50)","Probable alto (P75)","Optimista (P90)","Mejor caso (P95)"],
                     "Capital final":[f"${v:,.0f}" for v in cv],
                     "Retorno":[f"{v/mc.capital-1:+.1%}" for v in cv],
                     "Ganancia/Pérdida":[f"${v-mc.capital:+,.0f}" for v in cv],
-                    "Interpretación":[
-                        "Solo 5% termina peor. Pérdida máxima probable.",
-                        "90% de probabilidad de superar este resultado.",
-                        "75% de probabilidad de superar este resultado.",
-                        "Escenario más probable (mitad arriba, mitad abajo).",
-                        "Solo 25% supera este resultado.",
-                        "Solo 10% es mejor.",
-                        "Casi el mejor caso posible (top 5%)."]})
+                })
                 st.dataframe(pct_df,use_container_width=True,hide_index=True)
-                st.caption("💡 El percentil (P) indica qué % de escenarios termina por debajo de ese valor.")
 
         # ── STRESS ────────────────────────────────────────────────────────
         st.divider()
