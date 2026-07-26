@@ -33,7 +33,7 @@ Diseño:
 """
 
 from __future__ import annotations
-
+# para  usar sintaxis moderna de lenguaje de prog
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Sequence
