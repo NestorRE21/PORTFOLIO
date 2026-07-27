@@ -17,7 +17,7 @@ Flujo de uso:
     result = run_profile(
         returns        = df_log_returns,      # DataFrame (fechas × activos) log-ret
         equity_assets  = ["AAPL", "MSFT", ...],
-        forced_assets  = {"FICCMP13": ForcedAsset(ret_annual=0.0625, ...)},
+        forced_assets  = {"FICCMP13": ForcedAsset(ret_annual=0.065, ...)},
         profile        = RiskProfile.for_split(0.50, 0.50),
         views          = [ ... ],
         config         = BLConfig(),
@@ -33,7 +33,7 @@ Diseño:
 """
 
 from __future__ import annotations
-# para  usar sintaxis moderna de lenguaje de prog
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Sequence
@@ -549,28 +549,40 @@ def mean_variance_optimize(mu: pd.Series, cov: pd.DataFrame,
 
 def run_profile(returns: pd.DataFrame, equity_assets: Sequence[str],
                 forced_assets: dict[str, ForcedAsset], profile: RiskProfile,
+                rf_assets: Optional[Sequence[str]] = None,
                 views: Optional[Sequence[View]] = None,
                 config: Optional[BLConfig] = None,
                 benchmark_returns: Optional[pd.Series] = None,
                 betas: Optional[pd.Series] = None) -> ProfileResult:
     """
     Pipeline completo para un perfil:
-      1. Inyecta FICO forzado.
+      1. Inyecta FICO forzado (si hay).
       2. Estima covarianza Ledoit-Wolf.
       3. Calibra λ y calcula equilibrio Π.
       4. Aplica views vía Black-Litterman.
       5. Optimiza Mean-Variance con restricciones.
+
+    rf_assets: tickers de renta fija de mercado (bonos/ETFs de yfinance).
+               Van al bucket RF junto con forced_assets (FICO).
+               Si rf_assets está vacío y forced_assets también, falla.
     """
     config = config or BLConfig()
     views  = views or []
+    rf_assets = list(rf_assets or [])
 
     equity_assets = [a for a in equity_assets if a in returns.columns]
-    fico_assets   = list(forced_assets.keys())
+    rf_market     = [a for a in rf_assets if a in returns.columns]
+    forced_tickers = list(forced_assets.keys())
+    all_rf        = rf_market + forced_tickers  # Todo lo que va al bucket RF
+
     if not equity_assets:
         raise ValueError("No hay activos de renta variable válidos en 'returns'.")
+    if not all_rf:
+        raise ValueError("No hay activos de renta fija (ni bonos ni FICO).")
 
-    # 1. Inyectar FICO
-    full = inject_forced_assets(returns[equity_assets], forced_assets,
+    # 1. Construir DataFrame completo: equity + RF mercado + FICO sintético
+    data_cols = equity_assets + rf_market
+    full = inject_forced_assets(returns[data_cols], forced_assets,
                                 config.periods_per_year)
     assets = list(full.columns)
 
@@ -579,11 +591,11 @@ def run_profile(returns: pd.DataFrame, equity_assets: Sequence[str],
 
     # 3. Equilibrio
     lam   = calibrate_lambda(benchmark_returns, config)
-    w_mkt = market_weights(assets, equity_assets, fico_assets,
+    w_mkt = market_weights(assets, equity_assets, all_rf,
                            profile.equity_target, profile.fico_target)
     pi    = equilibrium_returns(cov, w_mkt, lam, config.rf_annual)
 
-    # Forzar el retorno del FICO en el ancla de equilibrio
+    # Forzar retorno del FICO en el ancla de equilibrio (RF de mercado se queda libre)
     for ticker, fa in forced_assets.items():
         if ticker in pi.index:
             pi.loc[ticker] = fa.ret_annual
@@ -592,7 +604,7 @@ def run_profile(returns: pd.DataFrame, equity_assets: Sequence[str],
     P, Q, conf, _ = build_views(assets, views)
     ret_bl, sigma_bl = black_litterman(cov, pi, P, Q, conf, config)
 
-    # Reforzar retorno FICO tras BL (no debe moverse por views de equity)
+    # Reforzar retorno FICO tras BL
     for ticker, fa in forced_assets.items():
         if ticker in ret_bl.index:
             ret_bl.loc[ticker] = fa.ret_annual
@@ -604,9 +616,9 @@ def run_profile(returns: pd.DataFrame, equity_assets: Sequence[str],
             betas.loc[ticker] = fa.beta
     betas = betas.reindex(assets).fillna(1.0)
 
-    # 6. Optimización Mean-Variance
+    # 6. Optimización — all_rf va al bucket RF
     weights, ok, msg = mean_variance_optimize(
-        ret_bl, sigma_bl, equity_assets, fico_assets,
+        ret_bl, sigma_bl, equity_assets, all_rf,
         profile, lam, betas, config)
 
     # 7. Métricas
@@ -618,7 +630,7 @@ def run_profile(returns: pd.DataFrame, equity_assets: Sequence[str],
     sharpe   = (exp_ret - config.rf_annual) / vol if vol > EPS else float("nan")
     beta_p   = float(w_np @ betas.reindex(weights.index).fillna(1.0).to_numpy())
     eq_w     = float(weights[[a for a in weights.index if a in equity_assets]].sum())
-    fi_w     = float(weights[[a for a in weights.index if a in fico_assets]].sum())
+    fi_w     = float(weights[[a for a in weights.index if a in all_rf]].sum())
 
     # 8. Validación de factibilidad (matemática, no el flag del solver).
     #    scipy puede reportar mensajes engañosos aunque la solución sea válida;
