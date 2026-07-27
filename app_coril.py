@@ -18,30 +18,43 @@ EJ = ["AAPL","MSFT","NVDA","JNJ","KO","QQQ"]
 C_RV,C_RF,C_OPT = "#2E5E8C","#2CA02C","#D6604D"
 BC = ["#888","#E377C2","#FF7F0E","#9467BD","#17BECF"]
 
-for k,v in {"tickers":[],"benchmarks":["^GSPC"],"views":[],"optimized":False,"result":None,
+for k,v in {"tickers":[],"rf_tickers":[],"include_fico":True,"benchmarks":["^GSPC"],"views":[],"optimized":False,"result":None,
             "manual_weights":None,"returns":None,"bench_rets":None,"betas":None,"sectors":None,
             "returns_full":None,"bench_full":None,"last_period":None,"data_range":""}.items():
     st.session_state.setdefault(k,v)
 
 # ═══════════════════ BACKEND ══════════════════════════════════════════════════
+def _yf_period(period):
+    """Convierte períodos custom (como 15y) a parámetros de yfinance."""
+    if period in ["1y","2y","3y","5y","10y","max","ytd"]:
+        return {"period": period}
+    # Períodos custom: extraer años y calcular fecha de inicio
+    if period.endswith("y"):
+        years = int(period.replace("y",""))
+        start = (pd.Timestamp.today() - pd.DateOffset(years=years)).strftime("%Y-%m-%d")
+        return {"start": start}
+    return {"period": period}
+
 @st.cache_data(show_spinner=False,ttl=600)
-def dl_eq(tickers,period="5y"):
+def dl_eq(tickers,period="15y"):
     import yfinance as yf
-    raw=yf.download(tickers,period=period,interval="1wk",auto_adjust=True,progress=False)
+    params = _yf_period(period)
+    raw=yf.download(tickers,**params,interval="1wk",auto_adjust=True,progress=False)
     if raw is None or raw.empty: return None
     px=raw["Close"].copy() if isinstance(raw.columns,pd.MultiIndex) else raw[["Close"]].rename(columns={"Close":list(tickers)[0]})
     px=px.dropna(how="all").ffill(); px.index=pd.to_datetime(px.index).tz_localize(None)
     return np.log(px/px.shift(1)).replace([np.inf,-np.inf],np.nan).dropna(how="all")
 
 @st.cache_data(show_spinner=False,ttl=600)
-def dl_bk(tks,period="5y"):
+def dl_bk(tks,period="15y"):
     import yfinance as yf
     out={}
     for b in tks:
         b=b.strip().upper()
         if not b: continue
         try:
-            raw=yf.download(b,period=period,interval="1wk",auto_adjust=True,progress=False)
+            params = _yf_period(period)
+            raw=yf.download(b,**params,interval="1wk",auto_adjust=True,progress=False)
             if isinstance(raw.columns,pd.MultiIndex): raw.columns=raw.columns.get_level_values(0)
             p=raw["Close"]; 
             if isinstance(p,pd.DataFrame): p=p.iloc[:,0]
@@ -78,14 +91,17 @@ def search_yf(q):
         return [{"tk":x["symbol"],"nm":x.get("shortname") or x.get("longname",""),"tp":x.get("quoteType","")} for x in r.json().get("quotes",[]) if x.get("symbol")]
     except: return []
 
-def do_opt(tickers,views_cfg,eq_t,fi_t,pb):
-    betas=st.session_state.betas.copy(); betas[FICO_TK]=FICO.beta
-    ok=[t for t in tickers if t in st.session_state.returns.columns]; aa=set(ok)|{FICO_TK}
+def do_opt(eq_tickers, rf_tickers, include_fico, views_cfg, eq_t, fi_t, pb):
+    betas=st.session_state.betas.copy()
+    forced = {FICO_TK: FICO} if include_fico else {}
+    if include_fico: betas[FICO_TK]=FICO.beta
+    all_assets = set(eq_tickers) | set(rf_tickers) | (set(forced.keys()) if forced else set())
     views=[View(kind="absolute",asset=v["asset"],q=v["q"],confidence=v["confidence"]) if v["type"]=="absolute"
            else View(kind="relative",long=v["long"],short=v["short"],q=v["q"],confidence=v["confidence"])
-           for v in views_cfg if (v["type"]=="absolute" and v.get("asset") in aa) or
-                                  (v["type"]!="absolute" and v.get("long") in aa and v.get("short") in aa)]
-    return run_profile(returns=st.session_state.returns,equity_assets=ok,forced_assets={FICO_TK:FICO},
+           for v in views_cfg if (v["type"]=="absolute" and v.get("asset") in all_assets) or
+                                  (v["type"]!="absolute" and v.get("long") in all_assets and v.get("short") in all_assets)]
+    return run_profile(returns=st.session_state.returns,equity_assets=eq_tickers,
+                       forced_assets=forced, rf_assets=rf_tickers,
                        profile=RiskProfile.for_split(eq_t,fi_t),views=views,
                        config=BLConfig(rf_annual=RF,periods_per_year=PPY,tau=0.05,max_weight_equity=0.25,gamma_beta=5.0),
                        benchmark_returns=pb,betas=betas)
@@ -105,8 +121,11 @@ def wdd(w,rets,bd,cap):
 
 def run_dl(period):
     tks=st.session_state.tickers; bks=st.session_state.benchmarks
+    rf_tks=st.session_state.rf_tickers
     if not tks or not bks: return False
-    lr=dl_eq(tuple(tks),period)
+    # Descargar equity + RF de mercado juntos
+    all_market = list(set(tks + rf_tks))  # sin duplicados
+    lr=dl_eq(tuple(all_market),period)
     if lr is None or lr.empty: return False
     bd=dl_bk(tuple(bks),period)
     if not bd: return False
@@ -134,7 +153,7 @@ with st.sidebar:
     c1,c2=st.columns(2); c1.metric("RV",f"{eq_t:.0%}"); c2.metric("RF",f"{fi_t:.0%}")
     st.divider()
     capital=st.slider("Inversión (USD)",1_000,1_000_000,100_000,1_000,format="$%d")
-    period=st.selectbox("Historia",["1y","2y","3y","5y","10y","max"],index=3)
+    period=st.selectbox("Historia",["1y","2y","3y","5y","10y","15y","max"],index=5)
     with st.expander("⚙️ Avanzado"):
         _p=RiskProfile.for_split(eq_t,fi_t)
         st.caption(f"RF: {FICO_TK} · {FICO.ret_annual:.2%} | Beta: {_p.beta_min:.2f}–{_p.beta_max:.2f} | DD máx: {_p.max_drawdown:.0%}")
@@ -151,8 +170,8 @@ tab1,tab2,tab3,tab4=st.tabs(["1 · Activos","2 · Expectativas","3 · Portafolio
 # ═══════════════════ TAB 1 ════════════════════════════════════════════════════
 with tab1:
     col_s,col_t=st.columns([4,1])
-    with col_t: add_to=st.radio("Añadir como",["🔵 Activo","📊 Benchmark"])
-    with col_s: q=st.text_input("🔍 Buscar",placeholder="Visa, Apple, ^GSPC, QQQ…")
+    with col_t: add_to=st.radio("Añadir como",["🔵 Renta variable","🟢 Renta fija","📊 Benchmark"])
+    with col_s: q=st.text_input("🔍 Buscar",placeholder="Apple, TLT, SHY, AGG, ^GSPC…")
     if q.strip():
         res=search_yf(q.strip())
         if res:
@@ -160,29 +179,49 @@ with tab1:
             for i,r in enumerate(res):
                 with cols[i%len(cols)]:
                     if st.button(f"➕ {r['tk']} — {r['nm'][:18]}",key=f"a_{r['tk']}",use_container_width=True):
-                        tk=r['tk']; tgt="tickers" if add_to=="🔵 Activo" else "benchmarks"
-                        if tk not in st.session_state[tgt]: st.session_state[tgt].append(tk); st.toast(f"✓ {tk}")
+                        tk=r['tk']
+                        if add_to=="🔵 Renta variable":
+                            if tk not in st.session_state.tickers: st.session_state.tickers.append(tk); st.toast(f"✓ {tk} → RV")
+                        elif add_to=="🟢 Renta fija":
+                            if tk not in st.session_state.rf_tickers: st.session_state.rf_tickers.append(tk); st.toast(f"✓ {tk} → RF")
+                        else:
+                            if tk not in st.session_state.benchmarks: st.session_state.benchmarks.append(tk); st.toast(f"✓ {tk} → Benchmark")
     if not st.session_state.tickers:
         if st.button("🚀 Cargar ejemplo",type="primary"):
-            st.session_state.tickers=list(EJ); st.session_state.views=[]
+            st.session_state.tickers=list(EJ); st.session_state.views=[]; st.session_state.rf_tickers=[]
 
-    la,lb=st.columns(2)
+    # ── Listas: RV + RF + Benchmarks ─────────────────────────────────────
+    la,lb,lc=st.columns(3)
     with la:
-        st.caption(f"**🔵 Activos ({len(st.session_state.tickers)})**")
+        st.caption(f"**🔵 Renta variable ({len(st.session_state.tickers)})**")
         for i,t in enumerate(st.session_state.tickers):
             c1,c2=st.columns([5,1]); c1.write(t)
             if c2.button("✕",key=f"ra{i}"):
                 rm=st.session_state.tickers.pop(i)
                 st.session_state.views=[v for v in st.session_state.views if v.get("asset")!=rm and v.get("long")!=rm and v.get("short")!=rm]
     with lb:
+        st.caption(f"**🟢 Renta fija ({len(st.session_state.rf_tickers)})**")
+        # Toggle FICO
+        include_fico = st.checkbox("Incluir FICO Coril (6.5%)", value=True, key="fico_toggle")
+        st.session_state.include_fico = include_fico
+        if include_fico:
+            st.caption(f"✓ {FICO_TK} · {FICO.ret_annual:.2%} forzado")
+        for i,t in enumerate(st.session_state.rf_tickers):
+            c1,c2=st.columns([5,1]); c1.write(t)
+            if c2.button("✕",key=f"rrf{i}"): st.session_state.rf_tickers.pop(i)
+        if not st.session_state.rf_tickers and not include_fico:
+            st.warning("Sin activos de renta fija.")
+    with lc:
         st.caption(f"**📊 Benchmarks ({len(st.session_state.benchmarks)})**")
         for i,b in enumerate(st.session_state.benchmarks):
             c1,c2=st.columns([5,1]); c1.write(b)
             if c2.button("✕",key=f"rb{i}"): st.session_state.benchmarks.pop(i)
 
+    # ── Descarga ─────────────────────────────────────────────────────────
+    has_rf = bool(st.session_state.rf_tickers) or st.session_state.get("include_fico", True)
+    can_dl = bool(st.session_state.tickers and st.session_state.benchmarks and has_rf)
     if st.session_state.data_range: st.success(f"📦 {st.session_state.data_range} ({st.session_state.last_period})")
-    if st.button("📥 Descargar datos",type="primary",use_container_width=True,
-                 disabled=not(st.session_state.tickers and st.session_state.benchmarks)):
+    if st.button("📥 Descargar datos",type="primary",use_container_width=True, disabled=not can_dl):
         with st.spinner("Descargando…"):
             if run_dl(period): st.success(f"✅ {st.session_state.data_range}")
             else: st.error("Error. Verifica tickers.")
@@ -220,7 +259,9 @@ with tab3:
         if st.button("🔄 Optimizar",type="primary",use_container_width=True):
             pb=list(st.session_state.bench_rets.values())[0]
             with st.spinner("Calculando…"):
-                r=do_opt(st.session_state.tickers,st.session_state.views,eq_t,fi_t,pb)
+                r=do_opt(st.session_state.tickers, st.session_state.rf_tickers,
+                         st.session_state.get("include_fico",True),
+                         st.session_state.views, eq_t, fi_t, pb)
             for k in list(st.session_state.keys()):
                 if k.startswith("s_"): del st.session_state[k]
             st.session_state.result=r; st.session_state.manual_weights=r.weights.copy(); st.session_state.optimized=True
@@ -335,13 +376,27 @@ with tab4:
             st.success(f"En **{mc.horizon_years:.0f} año(s)**, tu inversión de ${mc.capital:,.0f} probablemente valdrá "
                        f"entre **${mc.percentiles[5][-1]:,.0f}** y **${mc.percentiles[95][-1]:,.0f}**, "
                        f"con un valor más probable de **${mc.median_path[-1]:,.0f}**.")
+            st.caption("_Método: Movimiento Browniano Geométrico (GBM) con distribución normal multivariada._")
+
+            # Identificar paths extremos y mediano
+            terminal = mc.terminal
+            idx_best = int(np.argmax(terminal))
+            idx_worst = int(np.argmin(terminal))
+            idx_median = int(np.argsort(terminal)[len(terminal)//2])
+
             fig=go.Figure(); x=mc.dates
             for lo,hi,cl,nm in [(5,95,"rgba(46,94,140,0.08)","90% de escenarios"),(10,90,"rgba(46,94,140,0.12)","80%"),(25,75,"rgba(46,94,140,0.18)","50%")]:
                 fig.add_trace(go.Scatter(x=list(x)+list(x[::-1]),y=list(mc.percentiles[hi])+list(mc.percentiles[lo][::-1]),fill="toself",fillcolor=cl,line=dict(width=0),name=nm))
-            fig.add_trace(go.Scatter(x=x,y=mc.median_path,name="Más probable",line=dict(color=C_RV,width=2.5)))
+            # Paths destacados
+            fig.add_trace(go.Scatter(x=x, y=mc.paths[idx_best], name=f"🚀 Mejor: ${terminal[idx_best]:,.0f}",
+                                    line=dict(color="#2CA02C", width=1.5, dash="dash")))
+            fig.add_trace(go.Scatter(x=x, y=mc.paths[idx_worst], name=f"😟 Peor: ${terminal[idx_worst]:,.0f}",
+                                    line=dict(color="#D6604D", width=1.5, dash="dash")))
+            fig.add_trace(go.Scatter(x=x, y=mc.paths[idx_median], name=f"📊 Mediana: ${terminal[idx_median]:,.0f}",
+                                    line=dict(color=C_RV, width=2.5)))
             fig.add_hline(y=mc.capital,line_dash="dot",line_color="gray",annotation_text=f"Inversión ${mc.capital:,.0f}")
             if mc.target!=mc.capital: fig.add_hline(y=mc.target,line_dash="dot",line_color=C_RF,annotation_text=f"Meta ${mc.target:,.0f}")
-            fig.update_yaxes(tickprefix="$",tickformat=",.0f"); fig.update_layout(height=380,margin=dict(l=0,r=0,t=5,b=0),legend=dict(orientation="h",y=-0.12))
+            fig.update_yaxes(tickprefix="$",tickformat=",.0f"); fig.update_layout(height=420,margin=dict(l=0,r=0,t=5,b=0),legend=dict(orientation="h",y=-0.12))
             st.plotly_chart(fig,use_container_width=True)
             sc1,sc2,sc3=st.columns(3)
             sc1.metric("😟 Si va mal (P5)",f"${mc.percentiles[5][-1]:,.0f}",delta=f"{mc.percentiles[5][-1]/mc.capital-1:+.1%}")
