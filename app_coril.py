@@ -9,7 +9,7 @@ from projections import monte_carlo, stress_test, CRISIS_PERIODS
 st.set_page_config(page_title="Coril · Portafolios", page_icon="📈", layout="wide")
 RF,PPY = 0.02,52
 FICO_TK = "FICCMP13"
-FICO = ForcedAsset(ret_annual=0.065,vol_annual=0.010,beta=0.30,sector="Factoring",region="Perú",moneda="USD",instrumento="Fondo")
+FICO = ForcedAsset(ret_annual=0.0625,vol_annual=0.010,beta=0.30,sector="Factoring",region="Perú",moneda="USD",instrumento="Fondo")
 PERFILES = {"Conservador (30/70)":(0.30,0.70),"Moderado-bajo (40/60)":(0.40,0.60),
             "Moderado (50/50)":(0.50,0.50),"Crecimiento (60/40)":(0.60,0.40),"Agresivo (70/30)":(0.70,0.30)}
 P_DESC = {"Conservador (30/70)":"Preservar capital.","Moderado-bajo (40/60)":"Leve crecimiento.",
@@ -86,10 +86,52 @@ def fetch_sec(tickers):
 def search_yf(q):
     import requests
     try:
-        r=requests.get("https://query2.finance.yahoo.com/v1/finance/search",params={"q":q,"quotesCount":6,"newsCount":0},
+        r=requests.get("https://query2.finance.yahoo.com/v1/finance/search",params={"q":q,"quotesCount":12,"newsCount":0},
                        headers={"User-Agent":"Mozilla/5.0"},timeout=5)
-        return [{"tk":x["symbol"],"nm":x.get("shortname") or x.get("longname",""),"tp":x.get("quoteType","")} for x in r.json().get("quotes",[]) if x.get("symbol")]
+        return [{"tk":x["symbol"],"nm":x.get("shortname") or x.get("longname",""),
+                 "tp":x.get("quoteType",""),"ex":x.get("exchange","")}
+                for x in r.json().get("quotes",[]) if x.get("symbol")]
     except: return []
+
+# Keywords en nombre que indican renta fija
+_RF_KW = {"bond","treasury","income","fixed","aggregate","debt","govt","municipal",
+          "corporate bond","tips","tbill","bill","note","yield","interest rate",
+          "money market","short term","intermediate","long term","investment grade",
+          "high yield","credit","inflation","sovereign","tlt","shy","ief","agg",
+          "bnd","lqd","hyg","tip","bil","shv","govt","mbb","vcsh","vcit","vclt",
+          "biv","bsv","blv","vgsh","vgit","vglt","scho","schr","schz","spab","usig",
+          "igsb","igib","flot","stip","ltpz","zroz","edv","splb","sptl","spts",
+          "bono","renta fija","deuda","tesor"}
+
+def _is_rf_candidate(r):
+    """Heurística: ¿el resultado parece renta fija?"""
+    nm = (r.get("nm","") or "").lower()
+    tk = (r.get("tk","") or "").upper()
+    # ETFs/fondos con keywords de RF en nombre
+    if any(kw in nm for kw in _RF_KW): return True
+    if tk.lower() in _RF_KW: return True
+    return False
+
+def _is_rv_candidate(r):
+    """Heurística: ¿el resultado parece renta variable?"""
+    tp = r.get("tp","")
+    # Acciones individuales → siempre RV
+    if tp == "EQUITY": return True
+    # ETFs/fondos → solo si NO parece RF
+    if tp in ("ETF","MUTUALFUND"):
+        return not _is_rf_candidate(r)
+    # Índices → depende del contexto, los dejamos pasar
+    if tp == "INDEX": return True
+    return True  # por defecto permitir
+
+def filter_search(results, category):
+    """Filtra resultados de búsqueda según la categoría seleccionada."""
+    if category == "🔵 Renta variable":
+        return [r for r in results if _is_rv_candidate(r)]
+    elif category == "🟢 Renta fija":
+        return [r for r in results if r.get("tp") in ("ETF","MUTUALFUND","INDEX") or _is_rf_candidate(r)]
+    else:  # Benchmark — no filtrar
+        return results
 
 def do_opt(eq_tickers, rf_tickers, include_fico, views_cfg, eq_t, fi_t, pb):
     betas=st.session_state.betas.copy()
@@ -178,10 +220,14 @@ with tab1:
     with col_t: add_to=st.radio("Añadir como",["🔵 Renta variable","🟢 Renta fija","📊 Benchmark"])
     with col_s: q=st.text_input("🔍 Buscar",placeholder="Apple, TLT, SHY, AGG, ^GSPC…")
     if q.strip():
-        res=search_yf(q.strip())
+        raw_res=search_yf(q.strip())
+        res=filter_search(raw_res, add_to)
+        if not res and raw_res:
+            st.caption(f"ℹ️ No se encontraron resultados compatibles con **{add_to}**. "
+                       f"Se encontraron {len(raw_res)} de otra clase.")
         if res:
-            cols=st.columns(min(len(res),3))
-            for i,r in enumerate(res):
+            cols=st.columns(min(len(res[:6]),3))
+            for i,r in enumerate(res[:6]):
                 with cols[i%len(cols)]:
                     if st.button(f"➕ {r['tk']} — {r['nm'][:18]}",key=f"a_{r['tk']}",use_container_width=True):
                         tk=r['tk']
@@ -207,7 +253,7 @@ with tab1:
     with lb:
         st.caption(f"**🟢 Renta fija ({len(st.session_state.rf_tickers)})**")
         # Toggle FICO
-        include_fico = st.checkbox("Incluir FICO Coril (6.5%)", value=True, key="fico_toggle")
+        include_fico = st.checkbox("Incluir FICO Coril (6.25%)", value=True, key="fico_toggle")
         st.session_state.include_fico = include_fico
         if include_fico:
             st.caption(f"✓ {FICO_TK} · {FICO.ret_annual:.2%} forzado")
@@ -400,9 +446,18 @@ with tab4:
             idx_median = int(np.argsort(terminal)[len(terminal)//2])
             x = mc.dates
 
+            # ── Métricas clave MC ──
+            p5_val  = mc.percentiles[5][-1]
+            p50_val = mc.percentiles[50][-1]
+            p95_val = mc.percentiles[95][-1]
+            gbm_min = terminal[idx_worst]
+            gbm_max = terminal[idx_best]
+
             # ── GRÁFICO 1: Monte Carlo — bandas de percentiles ───────────
-            st.markdown("#### Distribución de resultados (bandas de confianza)")
-            st.caption("Cada banda muestra qué porcentaje de escenarios cae dentro de ese rango.")
+            st.markdown("#### 📊 Distribución de resultados — Bandas de confianza")
+            st.caption("Este gráfico resume el **rango probable** de tu inversión. "
+                       "Las bandas muestran dónde caería tu capital en el 50%, 80% y 90% de los escenarios simulados. "
+                       "La línea central (mediana) es el resultado más representativo.")
             fig1=go.Figure()
             for lo,hi,cl,nm in [(5,95,"rgba(46,94,140,0.08)","90% de escenarios"),
                                 (10,90,"rgba(46,94,140,0.12)","80%"),
@@ -422,28 +477,37 @@ with tab4:
                               legend=dict(orientation="h",y=-0.12))
             st.plotly_chart(fig1,use_container_width=True)
 
+            # Interpretación MC
+            st.info(
+                f"**¿Cómo leerlo?** De {len(terminal):,} simulaciones, el 90% terminó entre "
+                f"**${p5_val:,.0f}** y **${p95_val:,.0f}**. "
+                f"El valor más probable (mediana) es **${p50_val:,.0f}** "
+                f"({'ganancia' if p50_val>mc.capital else 'pérdida'} de "
+                f"**{abs(p50_val/mc.capital-1):.1%}**). "
+                f"La banda más oscura (50% central) es donde se concentra la mayoría de resultados — "
+                f"si la banda es angosta, el portafolio tiene comportamiento más predecible."
+            )
+
             # ── GRÁFICO 2: GBM — trayectorias individuales ───────────────
-            st.markdown("#### Trayectorias simuladas (Movimiento Browniano Geométrico)")
+            st.markdown("#### 🔀 Trayectorias individuales — Movimiento Browniano Geométrico")
+            st.caption("Mientras el gráfico anterior resume los rangos, este muestra **caminos concretos** "
+                       "que podría seguir tu inversión semana a semana. Cada línea gris es un escenario posible.")
             n_show = st.slider("Trayectorias a mostrar",10,200,50,10,
                                help="Cuántas simulaciones individuales dibujar de fondo.",
                                key="gbm_paths")
-            st.caption(f"De {len(terminal):,} simulaciones, se muestran {n_show} aleatorias "
-                       f"con la mejor, peor y mediana resaltadas.")
 
             fig2=go.Figure()
-            # Paths de fondo (muestra aleatoria)
             rng_vis = np.random.default_rng(0)
             sample_idx = rng_vis.choice(len(terminal), size=min(n_show, len(terminal)), replace=False)
             for si in sample_idx:
                 fig2.add_trace(go.Scatter(x=x,y=mc.paths[si],mode="lines",
                     line=dict(color="rgba(150,150,150,0.15)",width=0.5),
                     showlegend=False,hoverinfo="skip"))
-            # Paths destacados
             fig2.add_trace(go.Scatter(x=x,y=mc.paths[idx_best],
-                name=f"🚀 Mejor: ${terminal[idx_best]:,.0f} ({terminal[idx_best]/mc.capital-1:+.1%})",
+                name=f"🚀 Mejor: ${gbm_max:,.0f} ({gbm_max/mc.capital-1:+.1%})",
                 line=dict(color="#2CA02C",width=2.5)))
             fig2.add_trace(go.Scatter(x=x,y=mc.paths[idx_worst],
-                name=f"😟 Peor: ${terminal[idx_worst]:,.0f} ({terminal[idx_worst]/mc.capital-1:+.1%})",
+                name=f"😟 Peor: ${gbm_min:,.0f} ({gbm_min/mc.capital-1:+.1%})",
                 line=dict(color="#D6604D",width=2.5)))
             fig2.add_trace(go.Scatter(x=x,y=mc.paths[idx_median],
                 name=f"📊 Mediana: ${terminal[idx_median]:,.0f} ({terminal[idx_median]/mc.capital-1:+.1%})",
@@ -457,10 +521,33 @@ with tab4:
             fig2.update_layout(height=420,margin=dict(l=0,r=0,t=5,b=0),
                               legend=dict(orientation="h",y=-0.12))
             st.plotly_chart(fig2,use_container_width=True)
+
+            # Interpretación GBM
+            st.info(
+                f"**¿Cómo leerlo?** Cada línea gris es una posible evolución semanal de tu inversión. "
+                f"La mejor trayectoria alcanzó **${gbm_max:,.0f}** y la peor cayó a **${gbm_min:,.0f}**. "
+                f"Nota que estos extremos son más amplios que las bandas P5/P95 del gráfico anterior "
+                f"(${p5_val:,.0f} – ${p95_val:,.0f}), porque aquí ves los extremos absolutos de "
+                f"{len(terminal):,} simulaciones, no solo el rango donde cae el 90%."
+            )
+
+            # ── Métricas resumen ──
             sc1,sc2,sc3=st.columns(3)
-            sc1.metric("😟 Si va mal (P5)",f"${mc.percentiles[5][-1]:,.0f}",delta=f"{mc.percentiles[5][-1]/mc.capital-1:+.1%}")
-            sc2.metric("📊 Más probable (P50)",f"${mc.percentiles[50][-1]:,.0f}",delta=f"{mc.percentiles[50][-1]/mc.capital-1:+.1%}")
-            sc3.metric("🚀 Si va bien (P95)",f"${mc.percentiles[95][-1]:,.0f}",delta=f"{mc.percentiles[95][-1]/mc.capital-1:+.1%}")
+            sc1.metric("😟 Si va mal (P5)",f"${p5_val:,.0f}",delta=f"{p5_val/mc.capital-1:+.1%}")
+            sc2.metric("📊 Más probable (P50)",f"${p50_val:,.0f}",delta=f"{p50_val/mc.capital-1:+.1%}")
+            sc3.metric("🚀 Si va bien (P95)",f"${p95_val:,.0f}",delta=f"{p95_val/mc.capital-1:+.1%}")
+
+            # ── Explicación comparativa ──
+            with st.expander("❓ ¿Por qué los rangos del primer gráfico y del segundo son diferentes?"):
+                st.markdown(
+                    f"""**Ambos gráficos usan las mismas {len(terminal):,} simulaciones.** La diferencia está en qué muestran:
+
+**Gráfico 1 (Bandas)** → Muestra **percentiles estadísticos** (P5 a P95). Descarta el 5% de escenarios más extremos por arriba y por abajo. Es como decir: *"en 9 de cada 10 escenarios, tu inversión terminará entre ${p5_val:,.0f} y ${p95_val:,.0f}"*. Es la visión más útil para planificación.
+
+**Gráfico 2 (Trayectorias)** → Muestra **caminos individuales**, incluyendo el mejor y el peor absoluto de todas las simulaciones. La trayectoria peor (${gbm_min:,.0f}) y la mejor (${gbm_max:,.0f}) son outliers — eventos de probabilidad menor al 0.02% — pero existen en el universo de posibilidades.
+
+**¿Cuál usar?** Las bandas del gráfico 1 son tu referencia para tomar decisiones. El gráfico 2 muestra la volatilidad real del camino: aunque termines en la mediana, el viaje puede tener subidas y bajadas fuertes. Si las trayectorias grises te parecen muy erráticas, el portafolio podría beneficiarse de más renta fija."""
+                )
 
         # STRESS
         st.divider()
