@@ -153,15 +153,20 @@ with st.sidebar:
     c1,c2=st.columns(2); c1.metric("RV",f"{eq_t:.0%}"); c2.metric("RF",f"{fi_t:.0%}")
     st.divider()
     capital=st.slider("Inversión (USD)",1_000,1_000_000,100_000,1_000,format="$%d")
-    period=st.selectbox("Historia",["1y","2y","3y","5y","10y","15y","max"],index=5)
+    chart_years=st.selectbox("Ver gráfico desde hace",["1y","2y","3y","5y","10y","15y"],index=3,
+                             help="Solo afecta la vista del gráfico histórico. La optimización siempre usa 15 años.")
     with st.expander("⚙️ Avanzado"):
         _p=RiskProfile.for_split(eq_t,fi_t)
         st.caption(f"RF: {FICO_TK} · {FICO.ret_annual:.2%} | Beta: {_p.beta_min:.2f}–{_p.beta_max:.2f} | DD máx: {_p.max_drawdown:.0%}")
+        st.caption("Optimización siempre usa **15 años** de datos.")
         if st.button("🗑️ Limpiar caché",use_container_width=True): st.cache_data.clear(); st.toast("✓")
 
-# Auto-descarga si período cambió
-if st.session_state.tickers and st.session_state.benchmarks and st.session_state.last_period and st.session_state.last_period!=period:
-    with st.spinner(f"Actualizando a {period}…"): run_dl(period)
+# Descargar siempre con 15 años (fijo)
+OPT_PERIOD = "15y"
+
+# Auto-descarga si no hay datos aún (primera vez tras añadir tickers)
+if st.session_state.tickers and st.session_state.benchmarks and st.session_state.last_period and st.session_state.last_period!=OPT_PERIOD:
+    with st.spinner("Actualizando datos (15y)…"): run_dl(OPT_PERIOD)
 
 # ═══════════════════ MAIN ═════════════════════════════════════════════════════
 st.title("Optimizador de portafolios")
@@ -223,7 +228,7 @@ with tab1:
     if st.session_state.data_range: st.success(f"📦 {st.session_state.data_range} ({st.session_state.last_period})")
     if st.button("📥 Descargar datos",type="primary",use_container_width=True, disabled=not can_dl):
         with st.spinner("Descargando…"):
-            if run_dl(period): st.success(f"✅ {st.session_state.data_range}")
+            if run_dl(OPT_PERIOD): st.success(f"✅ {st.session_state.data_range}")
             else: st.error("Error. Verifica tickers.")
 
 # ═══════════════════ TAB 2 ════════════════════════════════════════════════════
@@ -319,24 +324,36 @@ with tab3:
                     fig.update_layout(height=280,margin=dict(l=0,r=0,t=5,b=0),showlegend=False)
                     st.plotly_chart(fig,use_container_width=True)
 
-            # Evolución histórica — grande, con DD de portafolio Y benchmark
-            pr,wl,dd,bw,bdd=wdd(wnorm,st.session_state.returns,st.session_state.bench_rets,capital)
+            # Evolución histórica — filtrada por chart_years, siempre desde capital inicial
+            pr_full,wl_full,dd_full,bw_full,bdd_full=wdd(wnorm,st.session_state.returns,st.session_state.bench_rets,capital)
+
+            # Filtrar al rango visual seleccionado
+            cy = int(chart_years.replace("y",""))
+            cutoff = pr_full.index.max() - pd.DateOffset(years=cy)
+            pr = pr_full.loc[pr_full.index >= cutoff]
+
+            # Recalcular wealth desde capital inicial para el rango visible
+            wl = np.exp(pr.cumsum()) * capital
+            dd = wl / wl.cummax() - 1
+            bw, bdd = {}, {}
+            for n in bw_full:
+                br = st.session_state.bench_rets[n].loc[pr.index].fillna(0) if n in st.session_state.bench_rets else pd.Series(0,index=pr.index)
+                bw[n] = np.exp(br.cumsum()) * capital
+                bdd[n] = bw[n] / bw[n].cummax() - 1
+
             fig=make_subplots(rows=2,cols=1,shared_xaxes=True,row_heights=[.65,.35],vertical_spacing=.04,
-                             subplot_titles=[f"Evolución de capital (${capital:,.0f})","Drawdown"])
+                             subplot_titles=[f"Evolución de capital · últimos {cy} años (${capital:,.0f})","Drawdown"])
             fig.add_trace(go.Scatter(x=wl.index,y=wl.values,name="Portafolio",
                                     line=dict(color=C_RV,width=2.5)),row=1,col=1)
             for i,(n,v) in enumerate(bw.items()):
                 fig.add_trace(go.Scatter(x=v.index,y=v.values,name=n,
                     line=dict(color=BC[i%len(BC)],dash="dash",width=1.5)),row=1,col=1)
-            # Drawdown portafolio
             fig.add_trace(go.Scatter(x=dd.index,y=dd.values,name="DD Portafolio",
                                     fill="tozeroy",fillcolor="rgba(214,96,77,0.3)",
                                     line=dict(color=C_OPT,width=1.5)),row=2,col=1)
-            # Drawdown benchmarks
             for i,(n,ddb) in enumerate(bdd.items()):
                 fig.add_trace(go.Scatter(x=ddb.index,y=ddb.values,name=f"DD {n}",
                     line=dict(color=BC[i%len(BC)],dash="dot",width=1)),row=2,col=1)
-            # Línea límite DD del perfil
             _prof=RiskProfile.for_split(eq_t,fi_t)
             fig.add_hline(y=-_prof.max_drawdown,line_dash="dash",line_color="black",
                          row=2,col=1,annotation_text=f"Límite {_prof.max_drawdown:.0%}")
@@ -346,7 +363,7 @@ with tab3:
                              legend=dict(orientation="h",y=-0.08,font=dict(size=10)))
             st.plotly_chart(fig,use_container_width=True)
 
-            # Métricas históricas inline
+            # Métricas históricas del rango visible
             ann_r=np.exp(pr.mean()*PPY)-1; ann_v=pr.std(ddof=1)*np.sqrt(PPY)
             from scipy.stats import norm as _norm
             mu_h=pr.mean()*PPY; sig_h=ann_v; z=_norm.ppf(0.05)
@@ -376,28 +393,70 @@ with tab4:
             st.success(f"En **{mc.horizon_years:.0f} año(s)**, tu inversión de ${mc.capital:,.0f} probablemente valdrá "
                        f"entre **${mc.percentiles[5][-1]:,.0f}** y **${mc.percentiles[95][-1]:,.0f}**, "
                        f"con un valor más probable de **${mc.median_path[-1]:,.0f}**.")
-            st.caption("_Método: Movimiento Browniano Geométrico (GBM) con distribución normal multivariada._")
 
-            # Identificar paths extremos y mediano
             terminal = mc.terminal
             idx_best = int(np.argmax(terminal))
             idx_worst = int(np.argmin(terminal))
             idx_median = int(np.argsort(terminal)[len(terminal)//2])
+            x = mc.dates
 
-            fig=go.Figure(); x=mc.dates
-            for lo,hi,cl,nm in [(5,95,"rgba(46,94,140,0.08)","90% de escenarios"),(10,90,"rgba(46,94,140,0.12)","80%"),(25,75,"rgba(46,94,140,0.18)","50%")]:
-                fig.add_trace(go.Scatter(x=list(x)+list(x[::-1]),y=list(mc.percentiles[hi])+list(mc.percentiles[lo][::-1]),fill="toself",fillcolor=cl,line=dict(width=0),name=nm))
+            # ── GRÁFICO 1: Monte Carlo — bandas de percentiles ───────────
+            st.markdown("#### Distribución de resultados (bandas de confianza)")
+            st.caption("Cada banda muestra qué porcentaje de escenarios cae dentro de ese rango.")
+            fig1=go.Figure()
+            for lo,hi,cl,nm in [(5,95,"rgba(46,94,140,0.08)","90% de escenarios"),
+                                (10,90,"rgba(46,94,140,0.12)","80%"),
+                                (25,75,"rgba(46,94,140,0.18)","50%")]:
+                fig1.add_trace(go.Scatter(x=list(x)+list(x[::-1]),
+                    y=list(mc.percentiles[hi])+list(mc.percentiles[lo][::-1]),
+                    fill="toself",fillcolor=cl,line=dict(width=0),name=nm))
+            fig1.add_trace(go.Scatter(x=x,y=mc.median_path,name="Mediana (P50)",
+                                     line=dict(color=C_RV,width=2.5)))
+            fig1.add_hline(y=mc.capital,line_dash="dot",line_color="gray",
+                          annotation_text=f"Inversión ${mc.capital:,.0f}")
+            if mc.target!=mc.capital:
+                fig1.add_hline(y=mc.target,line_dash="dot",line_color=C_RF,
+                              annotation_text=f"Meta ${mc.target:,.0f}")
+            fig1.update_yaxes(tickprefix="$",tickformat=",.0f")
+            fig1.update_layout(height=380,margin=dict(l=0,r=0,t=5,b=0),
+                              legend=dict(orientation="h",y=-0.12))
+            st.plotly_chart(fig1,use_container_width=True)
+
+            # ── GRÁFICO 2: GBM — trayectorias individuales ───────────────
+            st.markdown("#### Trayectorias simuladas (Movimiento Browniano Geométrico)")
+            n_show = st.slider("Trayectorias a mostrar",10,200,50,10,
+                               help="Cuántas simulaciones individuales dibujar de fondo.",
+                               key="gbm_paths")
+            st.caption(f"De {len(terminal):,} simulaciones, se muestran {n_show} aleatorias "
+                       f"con la mejor, peor y mediana resaltadas.")
+
+            fig2=go.Figure()
+            # Paths de fondo (muestra aleatoria)
+            rng_vis = np.random.default_rng(0)
+            sample_idx = rng_vis.choice(len(terminal), size=min(n_show, len(terminal)), replace=False)
+            for si in sample_idx:
+                fig2.add_trace(go.Scatter(x=x,y=mc.paths[si],mode="lines",
+                    line=dict(color="rgba(150,150,150,0.15)",width=0.5),
+                    showlegend=False,hoverinfo="skip"))
             # Paths destacados
-            fig.add_trace(go.Scatter(x=x, y=mc.paths[idx_best], name=f"🚀 Mejor: ${terminal[idx_best]:,.0f}",
-                                    line=dict(color="#2CA02C", width=1.5, dash="dash")))
-            fig.add_trace(go.Scatter(x=x, y=mc.paths[idx_worst], name=f"😟 Peor: ${terminal[idx_worst]:,.0f}",
-                                    line=dict(color="#D6604D", width=1.5, dash="dash")))
-            fig.add_trace(go.Scatter(x=x, y=mc.paths[idx_median], name=f"📊 Mediana: ${terminal[idx_median]:,.0f}",
-                                    line=dict(color=C_RV, width=2.5)))
-            fig.add_hline(y=mc.capital,line_dash="dot",line_color="gray",annotation_text=f"Inversión ${mc.capital:,.0f}")
-            if mc.target!=mc.capital: fig.add_hline(y=mc.target,line_dash="dot",line_color=C_RF,annotation_text=f"Meta ${mc.target:,.0f}")
-            fig.update_yaxes(tickprefix="$",tickformat=",.0f"); fig.update_layout(height=420,margin=dict(l=0,r=0,t=5,b=0),legend=dict(orientation="h",y=-0.12))
-            st.plotly_chart(fig,use_container_width=True)
+            fig2.add_trace(go.Scatter(x=x,y=mc.paths[idx_best],
+                name=f"🚀 Mejor: ${terminal[idx_best]:,.0f} ({terminal[idx_best]/mc.capital-1:+.1%})",
+                line=dict(color="#2CA02C",width=2.5)))
+            fig2.add_trace(go.Scatter(x=x,y=mc.paths[idx_worst],
+                name=f"😟 Peor: ${terminal[idx_worst]:,.0f} ({terminal[idx_worst]/mc.capital-1:+.1%})",
+                line=dict(color="#D6604D",width=2.5)))
+            fig2.add_trace(go.Scatter(x=x,y=mc.paths[idx_median],
+                name=f"📊 Mediana: ${terminal[idx_median]:,.0f} ({terminal[idx_median]/mc.capital-1:+.1%})",
+                line=dict(color=C_RV,width=3)))
+            fig2.add_hline(y=mc.capital,line_dash="dot",line_color="gray",
+                          annotation_text=f"Inversión ${mc.capital:,.0f}")
+            if mc.target!=mc.capital:
+                fig2.add_hline(y=mc.target,line_dash="dot",line_color=C_RF,
+                              annotation_text=f"Meta ${mc.target:,.0f}")
+            fig2.update_yaxes(tickprefix="$",tickformat=",.0f")
+            fig2.update_layout(height=420,margin=dict(l=0,r=0,t=5,b=0),
+                              legend=dict(orientation="h",y=-0.12))
+            st.plotly_chart(fig2,use_container_width=True)
             sc1,sc2,sc3=st.columns(3)
             sc1.metric("😟 Si va mal (P5)",f"${mc.percentiles[5][-1]:,.0f}",delta=f"{mc.percentiles[5][-1]/mc.capital-1:+.1%}")
             sc2.metric("📊 Más probable (P50)",f"${mc.percentiles[50][-1]:,.0f}",delta=f"{mc.percentiles[50][-1]/mc.capital-1:+.1%}")
